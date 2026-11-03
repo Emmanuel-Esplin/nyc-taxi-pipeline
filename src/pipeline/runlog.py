@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS run_rejections (
 
 @dataclass
 class RunRecord:
+    """One pipeline attempt. Filled in stage by stage, then written once at the end."""
+
     run_id: str
     year_month: str
     started_at: datetime
@@ -57,10 +59,12 @@ class RunRecord:
 
 
 def ensure_tables(con: duckdb.DuckDBPyConnection) -> None:
+    """Create the audit tables on first use (idempotent)."""
     con.execute(DDL)
 
 
 def record_run(con: duckdb.DuckDBPyConnection, run: RunRecord) -> None:
+    """Append the run and its per-rule counts. Runs inside the caller's transaction, if any."""
     ensure_tables(con)
     con.execute(
         "INSERT INTO run_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

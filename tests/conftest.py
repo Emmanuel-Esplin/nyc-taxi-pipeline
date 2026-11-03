@@ -1,3 +1,5 @@
+"""Shared fixtures: a known-good trip row and a helper that runs the rule engine on overrides."""
+
 from __future__ import annotations
 
 import duckdb
@@ -41,6 +43,7 @@ ZONES = pd.DataFrame(
 def trips_frame(rows: list[dict]) -> pd.DataFrame:
     frame = pd.DataFrame([{**VALID_TRIP, **row} for row in rows])
     frame.insert(0, "source_row", range(len(frame)))
+    # Nullable Int64 so a None passenger_count / location id reaches DuckDB as NULL, not NaN.
     return frame.astype({"passenger_count": "Int64", "pu_location_id": "Int64"})
 
 

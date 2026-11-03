@@ -1,3 +1,5 @@
+"""Month parsing and range generation used by the CLI and partition paths."""
+
 import pytest
 
 from pipeline.months import Month, month_range

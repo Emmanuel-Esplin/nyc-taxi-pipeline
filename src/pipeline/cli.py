@@ -11,6 +11,7 @@ from pipeline.pipeline import run_month
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define the CLI: a single `run` command taking --month or a --start/--end range."""
     parser = argparse.ArgumentParser(prog="pipeline", description=__doc__)
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, configure logging and run each requested month in order."""
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -37,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.start and not args.end:
             parser.error("--start requires --end")
         months = [args.month] if args.month else month_range(args.start, args.end)
+        # Months run sequentially and independently; a failure stops the backfill, and
+        # rerunning it is safe because every month load is idempotent.
         for month in months:
             run_month(config, month)
     return 0

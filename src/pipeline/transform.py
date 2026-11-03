@@ -15,14 +15,21 @@ log = logging.getLogger(__name__)
 
 
 def staging_trips_path(staging_dir: Path, month: Month) -> Path:
+    """Hive-style partition path, e.g. staging/trips/year=2025/month=01/trips.parquet."""
     partition = staging_dir / "trips" / f"year={month.year}" / f"month={month.month:02d}"
     return partition / "trips.parquet"
 
 
 def write_staging(con: duckdb.DuckDBPyConnection, month: Month, path: Path) -> int:
-    """Write clean rows with derived columns to the month's staging partition."""
+    """Write clean rows with derived columns to the month's staging partition.
+
+    Returns the row count read back from the written file, so the caller can reconcile it.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file and rename, so readers never see a half-written partition.
     tmp = path.with_suffix(".parquet.part")
+    # Surrogate key: hash of the natural key. Duplicates on that key were already
+    # quarantined, so trip_key is unique; coalesce keeps NULLs from collapsing the hash.
     key_parts = ", ".join(f"coalesce(CAST({col} AS VARCHAR), '')" for col in NATURAL_KEY)
     con.execute(
         f"""
@@ -35,11 +42,13 @@ def write_staging(con: duckdb.DuckDBPyConnection, month: Month, path: Path) -> i
                 hour(pickup_datetime) AS pickup_hour,
                 isodow(pickup_datetime) AS pickup_dow,
                 round(epoch(dropoff_datetime - pickup_datetime) / 60.0, 2) AS trip_duration_min,
+                -- tip as % of fare; undefined (NULL) for zero-fare trips
                 CASE WHEN fare_amount > 0
                      THEN round(CAST(tip_amount AS DOUBLE) / CAST(fare_amount AS DOUBLE) * 100, 2)
                 END AS tip_pct
             FROM {TAGGED_TABLE}
             WHERE len(failed_rules) = 0
+            -- deterministic order so a rerun writes an identical file
             ORDER BY pickup_datetime, source_row
         ) TO '{tmp}' (FORMAT parquet, COMPRESSION zstd)
         """

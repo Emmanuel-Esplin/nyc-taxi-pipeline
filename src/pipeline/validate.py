@@ -17,16 +17,21 @@ from pipeline.rules import NATURAL_KEY, Rule
 
 log = logging.getLogger(__name__)
 
+# Temp table holding every input row plus its failed_rules list; transform reads from it.
 TAGGED_TABLE = "tagged_trips"
 
 
 def rejected_path(staging_dir: Path, month: Month) -> Path:
+    """Quarantine partition, e.g. staging/rejected/year=2025/month=01/rejected.parquet."""
     partition = staging_dir / "rejected" / f"year={month.year}" / f"month={month.month:02d}"
     return partition / "rejected.parquet"
 
 
 @dataclass
 class ValidationResult:
+    """Row counts from one validation pass. A row failing several rules counts once in
+    rows_rejected but once per rule in failures_by_rule."""
+
     rows_in: int
     rows_clean: int
     rows_rejected: int
@@ -35,9 +40,13 @@ class ValidationResult:
 
 def tag_sql(source: str, rules: list[Rule]) -> str:
     """SELECT over `source` adding failed_rules: the names of every rule the row fails."""
+    # One CASE per rule yields the rule's name or NULL; coalesce(..., TRUE) makes a NULL
+    # predicate a failure. The list comprehension then drops the NULLs.
     checks = ",\n        ".join(
         f"CASE WHEN coalesce(({rule.failure_sql}), TRUE) THEN '{rule.name}' END" for rule in rules
     )
+    # _dup_rank numbers rows sharing a natural key in file order; the not_duplicate rule
+    # rejects every copy after the first.
     return f"""
     WITH ranked AS (
         SELECT *,
@@ -59,6 +68,7 @@ def apply_rules(con: duckdb.DuckDBPyConnection, source: str, rules: list[Rule]) 
 
 
 def summarise(con: duckdb.DuckDBPyConnection, rules: list[Rule]) -> ValidationResult:
+    """Count rows in, rows rejected and failures per rule (zero-filled for every rule)."""
     rows_in, rows_rejected = con.execute(
         f"SELECT count(*), count(*) FILTER (WHERE len(failed_rules) > 0) FROM {TAGGED_TABLE}"
     ).fetchone()
@@ -77,6 +87,7 @@ def summarise(con: duckdb.DuckDBPyConnection, rules: list[Rule]) -> ValidationRe
 
 
 def write_rejected(con: duckdb.DuckDBPyConnection, path: Path) -> None:
+    """Write quarantined rows with a readable reject_reason, atomically via a temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.part")
     con.execute(
@@ -95,6 +106,7 @@ def write_rejected(con: duckdb.DuckDBPyConnection, path: Path) -> None:
 def validate(
     con: duckdb.DuckDBPyConnection, source: str, rules: list[Rule], rejected_path: Path
 ) -> ValidationResult:
+    """Tag rows, write the quarantine file and log a per-rule summary."""
     apply_rules(con, source, rules)
     result = summarise(con, rules)
     write_rejected(con, rejected_path)

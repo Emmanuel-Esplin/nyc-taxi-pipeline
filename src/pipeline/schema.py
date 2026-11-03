@@ -14,9 +14,11 @@ import duckdb
 
 log = logging.getLogger(__name__)
 
+# Name of the temp view that validation reads from.
 TYPED_VIEW = "typed_trips"
 
-# staging column -> (raw column, lower-cased; DuckDB type)
+# staging column -> (raw column, lower-cased; DuckDB type).
+# Money is DECIMAL rather than DOUBLE so monthly revenue sums are exact to the cent.
 COLUMNS: dict[str, tuple[str, str]] = {
     "vendor_id": ("vendorid", "INTEGER"),
     "pickup_datetime": ("tpep_pickup_datetime", "TIMESTAMP"),
@@ -42,6 +44,7 @@ COLUMNS: dict[str, tuple[str, str]] = {
 
 
 def load_zone_lookup(con: duckdb.DuckDBPyConnection, zones_csv: Path) -> None:
+    """Load the zone lookup as the `zone_lookup` temp table used by the zone rules."""
     con.execute(
         f"""
         CREATE OR REPLACE TEMP TABLE zone_lookup AS
@@ -54,6 +57,8 @@ def load_zone_lookup(con: duckdb.DuckDBPyConnection, zones_csv: Path) -> None:
 
 def create_typed_view(con: duckdb.DuckDBPyConnection, raw_path: Path) -> None:
     """Rename to snake_case and TRY_CAST, so unparseable values become NULL and fail rules."""
+    # file_row_number gives every row a stable id (source_row) that is carried into the
+    # rejected files, so a quarantined row can be traced back to its position in the raw file.
     source = f"read_parquet('{raw_path}', file_row_number = true)"
     described = con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
     present = {row[0].lower(): row[0] for row in described}
