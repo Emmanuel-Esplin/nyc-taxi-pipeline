@@ -1,0 +1,96 @@
+"""Extract: land the month's trip file and the zone lookup in data/raw/, unchanged.
+
+Files are written to a temp name and renamed, so a crashed download never leaves a
+half-written file that a later run would mistake for a complete one.
+"""
+
+from __future__ import annotations
+
+import logging
+import shutil
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
+import duckdb
+
+from pipeline.config import Config
+from pipeline.months import Month
+
+log = logging.getLogger(__name__)
+
+ZONE_LOOKUP_FILE = "taxi_zone_lookup.csv"
+
+
+@dataclass(frozen=True)
+class ExtractResult:
+    trips_path: Path
+    zones_path: Path
+    trips_rows: int
+    trips_bytes: int
+    downloaded: bool
+
+
+def trip_filename(month: Month) -> str:
+    return f"yellow_tripdata_{month.key}.parquet"
+
+
+def extract(config: Config, month: Month) -> ExtractResult:
+    config.raw_dir.mkdir(parents=True, exist_ok=True)
+
+    trips_path = config.raw_dir / trip_filename(month)
+    zones_path = config.raw_dir / ZONE_LOOKUP_FILE
+    if config.source_dir:
+        downloaded = _copy_if_changed(config.source_dir / trip_filename(month), trips_path)
+        _copy_if_changed(config.source_dir / ZONE_LOOKUP_FILE, zones_path)
+    else:
+        url = config.trip_url_template.format(year_month=month.key)
+        downloaded = _download_if_changed(url, trips_path, config.timeout_seconds)
+        _download_if_changed(config.zone_lookup_url, zones_path, config.timeout_seconds)
+
+    rows = parquet_row_count(trips_path)
+    size = trips_path.stat().st_size
+    log.info("raw %s: %s rows, %.1f MB", trips_path.name, f"{rows:,}", size / 1e6)
+    return ExtractResult(trips_path, zones_path, rows, size, downloaded)
+
+
+def parquet_row_count(path: Path) -> int:
+    """Row count from parquet footer metadata - no data is scanned."""
+    query = "SELECT sum(num_rows) FROM parquet_file_metadata(?)"
+    return int(duckdb.execute(query, [str(path)]).fetchone()[0])
+
+
+def _copy_if_changed(source: Path, target: Path) -> bool:
+    if not source.exists():
+        raise FileNotFoundError(f"Source file not found: {source}")
+    if target.exists() and target.stat().st_size == source.stat().st_size:
+        log.info("skip %s: already in raw/ with matching size", target.name)
+        return False
+    tmp = target.with_suffix(target.suffix + ".part")
+    shutil.copyfile(source, tmp)
+    tmp.replace(target)
+    log.info("copied %s from %s", target.name, source.parent)
+    return True
+
+
+def _download_if_changed(url: str, target: Path, timeout: int) -> bool:
+    remote_size = _remote_size(url, timeout)
+    if target.exists() and remote_size is not None and target.stat().st_size == remote_size:
+        log.info("skip %s: already in raw/ with matching size", target.name)
+        return False
+    tmp = target.with_suffix(target.suffix + ".part")
+    log.info("downloading %s", url)
+    with urllib.request.urlopen(url, timeout=timeout) as response, tmp.open("wb") as out:
+        shutil.copyfileobj(response, out, length=1024 * 1024)
+    if remote_size is not None and tmp.stat().st_size != remote_size:
+        tmp.unlink()
+        raise OSError(f"Incomplete download of {url}: expected {remote_size} bytes")
+    tmp.replace(target)
+    return True
+
+
+def _remote_size(url: str, timeout: int) -> int | None:
+    request = urllib.request.Request(url, method="HEAD")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        length = response.headers.get("Content-Length")
+    return int(length) if length else None
