@@ -1,0 +1,20 @@
+# Pipeline configuration. Any path can be overridden with an env var:
+#   PIPELINE_DATA_DIR, PIPELINE_WAREHOUSE_PATH, PIPELINE_SOURCE_DIR, PIPELINE_SQL_DIR
+paths:
+  data_dir: data                      # raw/ and staging/ live under here
+  warehouse_path: data/warehouse.duckdb
+  sql_dir: sql
+
+source:
+  # Public TLC CDN. If source_dir is set, files are copied from there instead
+  # (offline runs, tests, or a pre-downloaded file).
+  trip_url_template: https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{year_month}.parquet
+  zone_lookup_url: https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv
+  source_dir: null
+  timeout_seconds: 120
+
+validation:
+  max_trip_hours: 24
+  max_trip_distance_miles: 200
+  max_fare_amount: 1000
+  max_total_amount: 1500
