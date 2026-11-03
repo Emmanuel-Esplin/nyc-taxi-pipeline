@@ -6,8 +6,8 @@ import argparse
 import logging
 
 from pipeline.config import load_config
-from pipeline.extract import extract
 from pipeline.months import Month, month_range
+from pipeline.pipeline import run_month
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,5 +38,5 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--start requires --end")
         months = [args.month] if args.month else month_range(args.start, args.end)
         for month in months:
-            extract(config, month)
+            run_month(config, month)
     return 0
