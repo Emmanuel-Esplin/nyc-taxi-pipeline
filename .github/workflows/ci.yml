@@ -5,24 +5,45 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token: no job needs to write to the repo.
 permissions:
   contents: read
 
+# A newer push to the same branch cancels the older, now-irrelevant run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to commit SHAs (tag in the comment) so a moved tag can't change CI.
 jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # scan full history, not just the tip
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Commenting on PRs needs write access; the job stays read-only.
+          GITLEAKS_ENABLE_COMMENTS: false
+
   lint-test:
     name: Lint and test (py${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12"]
+        python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -39,13 +60,17 @@ jobs:
   docker:
     name: Docker smoke test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build image
         run: docker build -t nyc-taxi-pipeline .
+      # Runs the real image end to end on the committed fixture, offline.
       - name: Run pipeline on the fixture month
         run: |
-          mkdir -p data && chmod 777 data
+          mkdir -p data && chmod 777 data  # container runs as a non-root user
           docker run --rm \
             -v "$PWD/data:/app/data" \
             -v "$PWD/tests/fixtures:/fixtures:ro" \

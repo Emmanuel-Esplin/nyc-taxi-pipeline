@@ -32,12 +32,18 @@ NATURAL_KEY = (
 
 @dataclass(frozen=True)
 class Rule:
+    """A named check. `failure_sql` is evaluated per row and is TRUE when the row fails."""
+
     name: str
     description: str
     failure_sql: str
 
 
 def build_rules(cfg: ValidationConfig, month: Month) -> list[Rule]:
+    """Rules for one month's file. Thresholds come from config; the month sets the window.
+
+    Rule order is the order failures are listed in reject_reason.
+    """
     start, end = month.start.isoformat(), month.end.isoformat()
     return [
         Rule(

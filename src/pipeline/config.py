@@ -47,6 +47,11 @@ class Config:
 
 
 def load_config(path: Path | str | None = None) -> Config:
+    """Read config.yaml (if present), apply PIPELINE_* env overrides and fill defaults.
+
+    Env vars win over the file so the same image can run locally, in CI and in Docker with
+    only the environment changing.
+    """
     path = Path(path) if path else DEFAULT_CONFIG
     raw = yaml.safe_load(path.read_text()) if path.exists() else {}
     raw.setdefault("paths", {})

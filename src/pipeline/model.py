@@ -26,11 +26,14 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Model:
+    """A SQL file in sql/ and how to materialise it."""
+
     name: str
     path: str
     materialized: str  # "table" | "incremental"
 
 
+# Build order matters: dimensions, then the fact, then aggregates that read the fact.
 MODELS = [
     Model("dim_zone", "marts/dim_zone.sql", "table"),
     Model("dim_date", "marts/dim_date.sql", "table"),
@@ -41,6 +44,7 @@ MODELS = [
     Model("agg_payment_tip_behaviour", "aggregates/agg_payment_tip_behaviour.sql", "incremental"),
 ]
 
+# Matches dbt-style {{ name }} placeholders.
 _PLACEHOLDER = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
 
@@ -76,10 +80,13 @@ def build_models(
             con.execute(f"CREATE OR REPLACE TABLE {model.name} AS {query}")
             rows[model.name] = con.execute(f"SELECT count(*) FROM {model.name}").fetchone()[0]
         elif model.materialized == "incremental":
+            # First run only: create an empty table with the query's schema.
             con.execute(
                 f"CREATE TABLE IF NOT EXISTS {model.name} AS SELECT * FROM ({query}) WHERE false"
             )
+            # Replace just this month, so other months are untouched and reruns are idempotent.
             con.execute(f"DELETE FROM {model.name} WHERE year_month = ?", [month.key])
+            # BY NAME matches columns by name, not position, so column order in SQL can change.
             con.execute(f"INSERT INTO {model.name} BY NAME {query}")
             rows[model.name] = con.execute(
                 f"SELECT count(*) FROM {model.name} WHERE year_month = ?", [month.key]

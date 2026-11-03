@@ -1,3 +1,5 @@
+"""The {{ variable }} renderer that turns sql/ files into executable SQL."""
+
 import pytest
 
 from pipeline.model import render
