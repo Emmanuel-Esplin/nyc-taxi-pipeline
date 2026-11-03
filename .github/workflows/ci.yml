@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test:
+    name: Lint and test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install
+        run: pip install -c requirements.lock -e '.[dev]'
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Test
+        run: pytest
+
+  docker:
+    name: Docker smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t nyc-taxi-pipeline .
+      - name: Run pipeline on the fixture month
+        run: |
+          mkdir -p data && chmod 777 data
+          docker run --rm \
+            -v "$PWD/data:/app/data" \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
+            -e PIPELINE_SOURCE_DIR=/fixtures \
+            nyc-taxi-pipeline run --month 2025-01
+          test -f data/warehouse.duckdb
