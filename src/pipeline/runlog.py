@@ -7,11 +7,12 @@ the history of every attempt (including failures) survives.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 import duckdb
 
 DDL = """
+-- Timestamps are naive UTC (see utcnow), whichever machine or container ran the pipeline.
 CREATE TABLE IF NOT EXISTS run_log (
     run_id            VARCHAR PRIMARY KEY,
     year_month        VARCHAR NOT NULL,
@@ -45,6 +46,12 @@ CREATE TABLE IF NOT EXISTS quality_results (
 """
 
 
+def utcnow() -> datetime:
+    """Current time as naive UTC. run_log rows come from laptops (local time) and containers
+    (UTC), so a single explicit zone keeps the history comparable."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 @dataclass
 class RunRecord:
     """One pipeline attempt. Filled in stage by stage, then written once at the end."""
@@ -66,7 +73,7 @@ class RunRecord:
 
     @property
     def duration_seconds(self) -> float:
-        end = self.finished_at or datetime.now()
+        end = self.finished_at or utcnow()
         return round((end - self.started_at).total_seconds(), 3)
 
 
