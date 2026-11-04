@@ -7,8 +7,13 @@ END   ?= 2025-03
 IMAGE ?= nyc-taxi-pipeline
 PYTHON ?= .venv/bin/python
 export PYTHONPATH := $(CURDIR)/src
+# Local secrets and settings (git-ignored; `make secrets` creates it). Loaded so targets
+# like `publish` see the same passwords as docker compose.
+-include .env
+export
+
 # Serving copy for BI, via the compose Postgres published on localhost:5433.
-SERVING_URL ?= postgresql://analytics_writer:local-dev-writer@localhost:5433/analytics
+SERVING_URL ?= postgresql://analytics_writer:$(ANALYTICS_WRITER_PASSWORD)@localhost:5433/analytics
 CHROME ?= /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 
 # dbt reads the same paths the pipeline uses; artifacts and logs go under data/dbt/.
@@ -19,7 +24,8 @@ DBT_ARGS = --project-dir dbt --profiles-dir dbt \
 DOCKER_RUN = docker run --rm -v "$(CURDIR)/data:/app/data" $(DOCKER_ENV) $(IMAGE)
 
 .PHONY: help install lint format test run backfill dbt-build docs quality-docs docker-build docker-run docker-backfill \
-	airflow-up airflow-down airflow-backfill airflow-logs up down bi-up bi-bootstrap publish screenshots clean
+	airflow-up airflow-down airflow-backfill airflow-logs up down bi-up bi-bootstrap publish screenshots \
+	secrets clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -66,6 +72,9 @@ docker-run: docker-build ## Run one month in Docker: make docker-run MONTH=2025-
 docker-backfill: docker-build ## Backfill in Docker: make docker-backfill START=2025-01 END=2025-03
 	@mkdir -p data
 	$(DOCKER_RUN) run --start $(START) --end $(END)
+
+secrets: ## Create/complete the git-ignored .env with random passwords (never overwrites)
+	python3 scripts/make_secrets.py
 
 up: ## Start everything: Airflow (:8080), Postgres and Metabase (:3000)
 	@mkdir -p data

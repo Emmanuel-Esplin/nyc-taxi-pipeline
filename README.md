@@ -70,7 +70,7 @@ make docker-run MONTH=2025-01
 make docker-backfill START=2025-01 END=2025-03
 
 # The full stack (docker compose): Airflow on :8080, Metabase on :3000
-cp .env.example .env                      # optional: bound the months the DAG schedules
+make secrets                              # once: creates the git-ignored .env with random passwords
 make up                                   # Postgres, Airflow, Metabase
 make airflow-backfill START=2025-01 END=2025-03   # each run ends by publishing to Postgres
 make bi-bootstrap                         # build/update the dashboard; prints a public link
@@ -156,6 +156,14 @@ with no third-party DuckDB plugin. `fact_trips` (8.65M rows) stays in DuckDB.
   read-only role, and creates or updates 11 native-SQL questions and the dashboard layout.
   Re-running it updates the same objects in place, and the README screenshot is taken from the
   dashboard's public link.
+- **Secrets stay local.** Every password and secret (the Postgres roles, the Metabase admin
+  and Airflow's JWT secret) comes from a git-ignored `.env`. `make secrets` generates it with
+  random values ([make_secrets.py](scripts/make_secrets.py)) and never overwrites values that
+  are already set. The repo holds no defaults: `docker compose` refuses to start and
+  `bootstrap.py` exits if one is missing. To rotate a database password, edit `.env` and
+  `docker compose up` (postgres-setup re-applies role passwords each run). To rotate the
+  Metabase admin, set the new `MB_ADMIN_PASSWORD`, run `make bi-bootstrap` once with
+  `MB_ADMIN_PREVIOUS_PASSWORD` set to the old one, then delete it.
 - **Timestamps are UTC.** `run_log` used to record local time on a laptop and UTC in
   containers, which the dashboard's run history exposed. Every timestamp is now naive UTC
   (`runlog.utcnow()`).
