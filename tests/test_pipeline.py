@@ -10,7 +10,7 @@ import duckdb
 import pytest
 
 from pipeline.config import load_config
-from pipeline.model import MODELS
+from pipeline.dbt import DbtBuildError
 from pipeline.months import Month
 from pipeline.pipeline import run_month
 from pipeline.transform import staging_trips_path
@@ -29,7 +29,7 @@ def config(tmp_path):
         base,
         data_dir=tmp_path / "data",
         warehouse_path=tmp_path / "data" / "warehouse.duckdb",
-        sql_dir=ROOT / "sql",
+        dbt_dir=ROOT / "dbt",
         source_dir=FIXTURES,
     )
 
@@ -39,12 +39,22 @@ def query(config, sql):
         return con.execute(sql).fetchall()
 
 
+# Every table dbt builds in the warehouse.
+MODELS = [
+    "dim_zone",
+    "dim_date",
+    "dim_payment_type",
+    "fact_trips",
+    "agg_daily_zone_demand",
+    "agg_hourly_revenue",
+    "agg_payment_tip_behaviour",
+]
+
+
 def snapshot(config) -> dict[str, list[tuple]]:
     """Every row of every model, in a deterministic order."""
     with duckdb.connect(str(config.warehouse_path), read_only=True) as con:
-        return {
-            m.name: con.execute(f"SELECT * FROM {m.name} ORDER BY ALL").fetchall() for m in MODELS
-        }
+        return {m: con.execute(f"SELECT * FROM {m} ORDER BY ALL").fetchall() for m in MODELS}
 
 
 def test_row_counts_reconcile_across_layers(config):
@@ -96,16 +106,18 @@ def test_rerunning_a_month_is_idempotent(config):
     assert query(config, "SELECT count(*) FROM run_log WHERE status = 'success'") == [(2,)]
 
 
-def test_failed_load_rolls_back_and_is_logged(config, tmp_path):
+def test_failed_build_is_logged_and_leaves_data_consistent(config, tmp_path):
     run_month(config, MONTH)
     before = snapshot(config)
 
-    broken_sql = tmp_path / "sql"
-    shutil.copytree(config.sql_dir, broken_sql)
-    (broken_sql / "aggregates" / "agg_payment_tip_behaviour.sql").write_text("SELECT nope")
-    with pytest.raises(duckdb.Error):
-        run_month(replace(config, sql_dir=broken_sql), MONTH)
+    broken_dbt = tmp_path / "dbt"
+    shutil.copytree(config.dbt_dir, broken_dbt, ignore=shutil.ignore_patterns("target", "logs"))
+    broken_model = broken_dbt / "models" / "aggregates" / "agg_payment_tip_behaviour.sql"
+    broken_model.write_text("select nope")
+    with pytest.raises(DbtBuildError, match="agg_payment_tip_behaviour"):
+        run_month(replace(config, dbt_dir=broken_dbt), MONTH)
 
+    # The failed model keeps its previous table; everything else was rebuilt identically.
     assert snapshot(config) == before
     assert query(config, "SELECT status FROM run_log ORDER BY started_at") == [
         ("success",),

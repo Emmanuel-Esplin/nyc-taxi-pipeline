@@ -1,4 +1,4 @@
-"""Orchestrate one month: extract -> validate -> transform -> model -> run_log."""
+"""Orchestrate one month: extract -> validate -> transform -> dbt build -> run_log."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from datetime import datetime
 import duckdb
 
 from pipeline.config import Config
+from pipeline.dbt import dbt_build
 from pipeline.extract import extract
-from pipeline.model import build_models
 from pipeline.months import Month
 from pipeline.rules import build_rules
 from pipeline.runlog import RunRecord, record_run
@@ -28,8 +28,9 @@ class ReconciliationError(RuntimeError):
 def run_month(config: Config, month: Month) -> RunRecord:
     """Process one month end to end and return its run_log record.
 
-    Raises on any failure, after recording a ``failed`` row in run_log. Because the warehouse
-    load is a single transaction, a failed run leaves the previous load for that month intact.
+    Raises on any failure, after recording a ``failed`` row in run_log. Each dbt model
+    replaces its month atomically, and the inputs are deterministic, so recovering from a
+    failed run is simply rerunning the month.
     """
     run = RunRecord(run_id=str(uuid.uuid4()), year_month=month.key, started_at=datetime.now())
     log.info("=== run %s for %s ===", run.run_id[:8], month)
@@ -53,22 +54,19 @@ def run_month(config: Config, month: Month) -> RunRecord:
         run.rows_in, run.rows_clean = result.rows_in, result.rows_clean
         run.rows_rejected, run.failures_by_rule = result.rows_rejected, result.failures_by_rule
 
-        # 4. Model: dimensions, fact, aggregates and the run_log row commit together or not at all.
+        # 4. Model: dbt builds dimensions, fact and aggregates and runs the data tests.
+        dbt_build(config, month)
+
+        # 5. Reconcile the load, then record success.
         with _warehouse(config) as wh:
-            wh.begin()
-            try:
-                rows = build_models(
-                    wh, config.sql_dir, month, staging_path.resolve(), raw.zones_path.resolve()
-                )
-                _reconcile("staged vs fact_trips", staged, rows["fact_trips"])
-                run.status, run.finished_at = "success", datetime.now()
-                record_run(wh, run)
-                wh.commit()
-            except Exception:
-                wh.rollback()
-                raise
+            loaded = wh.execute(
+                "SELECT count(*) FROM fact_trips WHERE year_month = ?", [month.key]
+            ).fetchone()[0]
+            _reconcile("staged vs fact_trips", staged, loaded)
+            run.status, run.finished_at = "success", datetime.now()
+            record_run(wh, run)
     except Exception as exc:
-        # Log the failure in its own transaction so it survives the rollback above.
+        # Record the failure so run_log keeps the history of every attempt.
         run.status, run.finished_at, run.error = "failed", datetime.now(), repr(exc)
         with _warehouse(config) as wh:
             record_run(wh, run)

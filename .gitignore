@@ -13,6 +13,10 @@ data/
 *.duckdb
 *.duckdb.wal
 
+# dbt (the pipeline writes these under data/dbt/, but manual runs default here)
+dbt/target/
+dbt/logs/
+
 # OS / editor
 .DS_Store
 .idea/

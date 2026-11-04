@@ -1,0 +1,21 @@
+version: 2
+
+# Both sources are files written by the Python pipeline, read in place by DuckDB.
+sources:
+  - name: pipeline
+    description: Outputs of the Python extract and validate stages.
+    tables:
+      - name: staging_trips
+        description: >
+          Validated, deduplicated trips, one parquet file per month
+          (data/staging/trips/year=YYYY/month=MM/trips.parquet).
+        meta:
+          external_location: >-
+            read_parquet('{{ env_var("PIPELINE_DATA_DIR", "data") }}/staging/trips/*/*/trips.parquet',
+            hive_partitioning = false)
+      - name: taxi_zone_lookup
+        description: TLC taxi zone lookup CSV, as downloaded into data/raw/.
+        meta:
+          external_location: >-
+            read_csv('{{ env_var("PIPELINE_DATA_DIR", "data") }}/raw/taxi_zone_lookup.csv',
+            header = true)

@@ -16,7 +16,7 @@ COPY src ./src
 RUN pip install -c requirements.lock .
 
 COPY config.yaml ./
-COPY sql ./sql
+COPY dbt ./dbt
 
 # Run as an unprivileged user; outputs go to the mounted data volume.
 RUN useradd --create-home --uid 1000 pipeline && mkdir -p /app/data && chown pipeline /app/data

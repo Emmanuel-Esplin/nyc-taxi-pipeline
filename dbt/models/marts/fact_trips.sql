@@ -1,6 +1,16 @@
--- fact_trips: one row per validated trip. Incremental, partitioned by year_month.
--- dbt: materialized='incremental', incremental_strategy='delete+insert', unique_key='year_month'.
-SELECT
+-- fact_trips: one row per validated trip.
+-- delete+insert on year_month: a run deletes the months it is loading, then inserts them,
+-- so rerunning a month replaces it with identical rows and leaves other months untouched.
+{{
+    config(
+        materialized='incremental',
+        incremental_strategy='delete+insert',
+        unique_key='year_month',
+        on_schema_change='fail',
+    )
+}}
+
+select
     trip_key,
     year_month,
     pickup_date,
@@ -27,4 +37,5 @@ SELECT
     cbd_congestion_fee,
     total_amount,
     tip_pct
-FROM read_parquet({{ staging_trips }})
+from {{ ref('stg_trips') }}
+{{ month_filter() }}
