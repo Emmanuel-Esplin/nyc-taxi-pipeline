@@ -94,3 +94,41 @@ jobs:
             -e PIPELINE_SOURCE_DIR=/fixtures \
             nyc-taxi-pipeline run --month 2025-01
           test -f data/warehouse.duckdb
+
+  airflow:
+    name: Airflow DAG test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build Airflow image
+        run: docker build -f docker/airflow.Dockerfile -t nyc-taxi-airflow .
+      # Parses the DAG, then runs one full DAG run (sensor -> extract -> validate -> dbt ->
+      # log) on the fixture month with SQLite metadata, and checks what it wrote.
+      - name: Run the DAG on the fixture month
+        run: |
+          mkdir -p data && chmod 777 data
+          docker run --rm \
+            -v "$PWD/data:/opt/airflow/data" \
+            -v "$PWD/tests/fixtures:/fixtures:ro" \
+            -e PIPELINE_SOURCE_DIR=/fixtures \
+            -e PIPELINE_TASK_RETRIES=0 \
+            -e AIRFLOW__CORE__LOAD_EXAMPLES=false \
+            nyc-taxi-airflow bash -euo pipefail -c '
+              airflow db migrate > /dev/null
+              airflow pools set nyc_taxi_pipeline 1 "DuckDB single writer" > /dev/null
+              airflow dags list-import-errors | tee /tmp/import-errors
+              grep -q "No data found" /tmp/import-errors
+              airflow dags test nyc_taxi_monthly 2025-01-01 | tee /tmp/dag-test.log
+              grep -q "state=success" /tmp/dag-test.log
+              python -c "
+          import duckdb
+          con = duckdb.connect(\"/opt/airflow/data/warehouse.duckdb\", read_only=True)
+          status, rows_clean = con.execute(\"SELECT status, rows_clean FROM run_log\").fetchone()
+          fact = con.execute(\"SELECT count(*) FROM fact_trips\").fetchone()[0]
+          assert status == \"success\" and fact == rows_clean > 0, (status, rows_clean, fact)
+          print(f\"run_log: {status}, fact_trips: {fact} rows\")
+          "
+            '

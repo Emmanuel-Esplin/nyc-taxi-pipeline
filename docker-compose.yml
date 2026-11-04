@@ -1,0 +1,86 @@
+# Local Airflow for the pipeline: Postgres metadata DB + api-server, scheduler and
+# dag-processor on the LocalExecutor. Start with `make airflow-up`, then open
+# http://localhost:8080. Pipeline outputs land in ./data, shared with the CLI and Docker runs.
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  image: nyc-taxi-airflow:latest
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # New DAGs start paused, so `up` never starts a backfill (and its downloads) by surprise.
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # Local development only: every UI user is an admin and no login is needed.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    # Signs task tokens; all Airflow services must share it. Override outside local use.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-dev-only-not-a-secret}
+    PIPELINE_START_MONTH: ${PIPELINE_START_MONTH:-2025-01}
+    PIPELINE_END_MONTH: ${PIPELINE_END_MONTH:-}
+    PIPELINE_SOURCE_DIR: ${PIPELINE_SOURCE_DIR:-}
+  volumes:
+    - ./data:/opt/airflow/data
+    - ./airflow/dags:/opt/airflow/dags  # live-edit DAGs without rebuilding the image
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    # Migrate the metadata DB and create the one-slot pool that serialises data tasks.
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow pools set nyc_taxi_pipeline 1 "One data task at a time: DuckDB single writer"
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow-db:

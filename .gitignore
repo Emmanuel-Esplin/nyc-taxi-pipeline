@@ -2,13 +2,16 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.venv
 .venv/
+*.nosync
 .pytest_cache/
 .ruff_cache/
 build/
 dist/
 
 # Pipeline outputs (never commit data; fixtures live in tests/fixtures)
+data
 data/
 *.duckdb
 *.duckdb.wal
@@ -21,3 +24,6 @@ dbt/logs/
 .DS_Store
 .idea/
 .vscode/
+
+# Local compose settings (see .env.example)
+.env
