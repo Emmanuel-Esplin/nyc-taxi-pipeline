@@ -8,6 +8,7 @@ import logging
 from pipeline.config import load_config
 from pipeline.months import Month, month_range
 from pipeline.pipeline import run_month
+from pipeline.publish import publish
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     which.add_argument("--month", type=Month.parse, help="Single month, e.g. 2025-01")
     which.add_argument("--start", type=Month.parse, help="First month of a backfill")
     run.add_argument("--end", type=Month.parse, help="Last month of a backfill (inclusive)")
+
+    commands.add_parser("publish", help="Copy serving tables to Postgres (PIPELINE_SERVING_URL)")
     return parser
 
 
@@ -43,4 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         # rerunning it is safe because every month load is idempotent.
         for month in months:
             run_month(config, month)
+        publish(config)  # once per invocation: serving tables are a full refresh
+    elif args.command == "publish":
+        publish(config)
     return 0

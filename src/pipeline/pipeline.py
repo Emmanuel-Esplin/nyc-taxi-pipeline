@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime
 
 import duckdb
 
@@ -15,7 +14,7 @@ from pipeline.extract import ExtractResult, extract
 from pipeline.months import Month
 from pipeline.quality import check_quality
 from pipeline.rules import build_rules
-from pipeline.runlog import RunRecord, record_run
+from pipeline.runlog import RunRecord, record_run, utcnow
 from pipeline.schema import TYPED_VIEW, create_typed_view, load_zone_lookup
 from pipeline.transform import staging_trips_path, write_staging
 from pipeline.validate import rejected_path, validate
@@ -83,7 +82,7 @@ def run_month(config: Config, month: Month) -> RunRecord:
     replaces its month atomically, and the inputs are deterministic, so recovering from a
     failed run is simply rerunning the month.
     """
-    run = RunRecord(run_id=str(uuid.uuid4()), year_month=month.key, started_at=datetime.now())
+    run = RunRecord(run_id=str(uuid.uuid4()), year_month=month.key, started_at=utcnow())
     log.info("=== run %s for %s ===", run.run_id[:8], month)
     try:
         # 1. Extract: land the raw file (skipped when an identical copy is already present).
@@ -103,11 +102,11 @@ def run_month(config: Config, month: Month) -> RunRecord:
         load(config, month, staged.rows_staged)
 
         # 6. Record success.
-        run.status, run.finished_at = "success", datetime.now()
+        run.status, run.finished_at = "success", utcnow()
         log_run(config, run)
     except Exception as exc:
         # Record the failure so run_log keeps the history of every attempt.
-        run.status, run.finished_at, run.error = "failed", datetime.now(), repr(exc)
+        run.status, run.finished_at, run.error = "failed", utcnow(), repr(exc)
         log_run(config, run)
         log.exception("run for %s failed", month)
         raise

@@ -20,7 +20,8 @@ COPY --chown=airflow:root pyproject.toml README.md /opt/pipeline/
 COPY --chown=airflow:root src /opt/pipeline/src
 RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" duckdb==1.5.6 \
         great_expectations==1.24.1 \
-    && pip install --no-cache-dir --no-deps /opt/pipeline
+    && pip install --no-cache-dir --no-deps /opt/pipeline \
+    && python -c "import duckdb; duckdb.sql('INSTALL postgres')"  # for publish_marts
 
 COPY --chown=airflow:root config.yaml /opt/pipeline/
 COPY --chown=airflow:root dbt /opt/pipeline/dbt

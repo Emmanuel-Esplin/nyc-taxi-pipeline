@@ -15,6 +15,8 @@ ENV_OVERRIDES = {
     "PIPELINE_WAREHOUSE_PATH": ("paths", "warehouse_path"),
     "PIPELINE_DBT_DIR": ("paths", "dbt_dir"),
     "PIPELINE_SOURCE_DIR": ("source", "source_dir"),
+    # Postgres URL for the BI serving copy. Env only: it carries a password.
+    "PIPELINE_SERVING_URL": ("serving", "postgres_url"),
 }
 
 
@@ -36,6 +38,7 @@ class Config:
     source_dir: Path | None
     timeout_seconds: int
     validation: ValidationConfig
+    serving_url: str | None = None
 
     @property
     def raw_dir(self) -> Path:
@@ -56,6 +59,7 @@ def load_config(path: Path | str | None = None) -> Config:
     raw = yaml.safe_load(path.read_text()) if path.exists() else {}
     raw.setdefault("paths", {})
     raw.setdefault("source", {})
+    raw.setdefault("serving", {})
 
     for env_var, (section, key) in ENV_OVERRIDES.items():
         if value := os.environ.get(env_var):
@@ -72,4 +76,5 @@ def load_config(path: Path | str | None = None) -> Config:
         source_dir=Path(source_dir) if source_dir else None,
         timeout_seconds=int(source.get("timeout_seconds", 120)),
         validation=ValidationConfig(**raw.get("validation", {})),
+        serving_url=raw["serving"].get("postgres_url"),
     )

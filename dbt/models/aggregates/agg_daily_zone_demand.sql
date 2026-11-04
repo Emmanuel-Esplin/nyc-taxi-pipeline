@@ -6,7 +6,7 @@ select
     z.borough,
     z.zone,
     count(*)                              as trips,
-    sum(f.passenger_count)                as passengers,
+    cast(sum(f.passenger_count) as bigint) as passengers,
     round(avg(f.trip_distance), 2)        as avg_trip_distance,
     round(avg(f.trip_duration_min), 2)    as avg_trip_duration_min,
     sum(f.total_amount)                   as total_revenue
