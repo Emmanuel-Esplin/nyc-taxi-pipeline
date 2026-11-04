@@ -1,6 +1,17 @@
-# Local Airflow for the pipeline: Postgres metadata DB + api-server, scheduler and
-# dag-processor on the LocalExecutor. Start with `make airflow-up`, then open
-# http://localhost:8080. Pipeline outputs land in ./data, shared with the CLI and Docker runs.
+# The whole stack, locally:
+#   Airflow   api-server, scheduler and dag-processor (LocalExecutor) on http://localhost:8080
+#   Postgres  Airflow's metadata DB, plus `analytics` (BI serving copy of the marts) and
+#             `metabase` (Metabase's own DB), created by postgres-setup
+#   Metabase  dashboards on `analytics` at http://localhost:3000
+# `make up` starts everything, `make airflow-up` / `make bi-up` start one side.
+# Pipeline outputs land in ./data, shared with the CLI and Docker runs.
+#
+# Passwords below are local-development defaults; override them in .env for anything else.
+
+x-serving-passwords: &serving-passwords
+  ANALYTICS_WRITER_PASSWORD: ${ANALYTICS_WRITER_PASSWORD:-local-dev-writer}
+  METABASE_READER_PASSWORD: ${METABASE_READER_PASSWORD:-local-dev-reader}
+  METABASE_APP_DB_PASSWORD: ${METABASE_APP_DB_PASSWORD:-local-dev-metabase}
 
 x-airflow-common: &airflow-common
   build:
@@ -22,12 +33,16 @@ x-airflow-common: &airflow-common
     PIPELINE_START_MONTH: ${PIPELINE_START_MONTH:-2025-01}
     PIPELINE_END_MONTH: ${PIPELINE_END_MONTH:-}
     PIPELINE_SOURCE_DIR: ${PIPELINE_SOURCE_DIR:-}
+    # The DAG's publish_marts task copies the marts here for Metabase.
+    PIPELINE_SERVING_URL: postgresql://analytics_writer:${ANALYTICS_WRITER_PASSWORD:-local-dev-writer}@postgres:5432/analytics
   volumes:
     - ./data:/opt/airflow/data
     - ./airflow/dags:/opt/airflow/dags  # live-edit DAGs without rebuilding the image
   depends_on:
     postgres:
       condition: service_healthy
+    postgres-setup:
+      condition: service_completed_successfully
 
 services:
   postgres:
@@ -38,10 +53,50 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - airflow-db:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"  # localhost only: lets `make publish` run from the host
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 5s
       retries: 10
+
+  postgres-setup:
+    image: postgres:17
+    entrypoint: ["/setup-serving.sh"]
+    environment:
+      <<: *serving-passwords
+      PGHOST: postgres
+      PGUSER: airflow
+      PGPASSWORD: airflow
+    volumes:
+      - ./docker/postgres/setup-serving.sh:/setup-serving.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  metabase:
+    image: metabase/metabase:v0.64.5
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: metabase_app
+      MB_DB_PASS: ${METABASE_APP_DB_PASSWORD:-local-dev-metabase}
+      MB_ANON_TRACKING_ENABLED: "false"
+      MB_CHECK_FOR_UPDATES: "false"
+      JAVA_OPTS: -Xmx1g
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:3000/api/health"]
+      interval: 10s
+      retries: 30
+      start_period: 60s
+    depends_on:
+      postgres-setup:
+        condition: service_completed_successfully
 
   airflow-init:
     <<: *airflow-common

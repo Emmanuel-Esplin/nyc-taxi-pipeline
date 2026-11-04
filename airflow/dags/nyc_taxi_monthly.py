@@ -4,11 +4,13 @@ Each DAG run processes the month of its data interval: the run for 2025-01-01 lo
 January 2025. Tasks call the same stage functions as the CLI (`pipeline.pipeline`):
 
     wait_for_source -> extract -> validate_and_stage -> quality_checks -> dbt_build -> log_run
+        -> publish_marts (copies the serving tables to Postgres for Metabase)
 
 Configuration comes from the environment (see docker-compose.yml):
     PIPELINE_START_MONTH  first month to load (default 2025-01); catchup backfills from here
     PIPELINE_END_MONTH    optional last month, to bound a backfill
     PIPELINE_TASK_RETRIES retries per task (default 2; CI sets 0 so failures surface fast)
+    PIPELINE_SERVING_URL  Postgres for the BI copy; publish_marts is a no-op without it
     PIPELINE_CONFIG       path to config.yaml; PIPELINE_* path overrides also apply
 """
 
@@ -27,8 +29,9 @@ from pipeline import pipeline
 from pipeline.config import Config, load_config
 from pipeline.extract import ExtractResult, extract, source_available
 from pipeline.months import Month
+from pipeline.publish import publish
 from pipeline.quality import check_quality
-from pipeline.runlog import RunRecord
+from pipeline.runlog import RunRecord, utcnow
 
 CONFIG_PATH = os.environ.get("PIPELINE_CONFIG", "/opt/pipeline/config.yaml")
 
@@ -68,13 +71,13 @@ def _record_failure(context) -> None:
     if raw:
         started = datetime.fromisoformat(raw["started_at"])
     else:
-        started = (ti.start_date or datetime.now()).replace(tzinfo=None)
+        started = ti.start_date.replace(tzinfo=None) if ti.start_date else utcnow()
     run = RunRecord(
         run_id=f"airflow:{context['dag_run'].run_id}:{uuid.uuid4().hex[:8]}",
         year_month=month.key,
         started_at=started,
         status="failed",
-        finished_at=datetime.now(),
+        finished_at=utcnow(),
         error=f"{context['task_instance'].task_id}: {context.get('exception')!r}",
     )
     pipeline.log_run(_config(), run)
@@ -122,7 +125,7 @@ def nyc_taxi_monthly():
     @task
     def extract_month() -> dict:
         # run_log times the work from here, not the (possibly weeks-long) wait for the file.
-        started_at = datetime.now().isoformat()
+        started_at = utcnow().isoformat()
         raw = extract(_config(), _month(get_current_context()))
         # XComs carry small JSON values; the data itself stays on the shared volume.
         paths = {"trips_path": str(raw.trips_path), "zones_path": str(raw.zones_path)}
@@ -164,7 +167,7 @@ def nyc_taxi_monthly():
             year_month=_month(context).key,
             started_at=datetime.fromisoformat(raw["started_at"]),
             status="success",
-            finished_at=datetime.now(),
+            finished_at=utcnow(),
             raw_file=Path(raw["trips_path"]).name,
             raw_bytes=raw["trips_bytes"],
             rows_in=staged["rows_in"],
@@ -175,13 +178,20 @@ def nyc_taxi_monthly():
         )
         pipeline.log_run(_config(), run)
 
+    @task
+    def publish_marts() -> None:
+        # After log_run, so the published run_log already includes this run. Separate
+        # from the load: if Postgres is down, the month is still loaded and logged, and
+        # this task retries on its own.
+        publish(_config())
+
     raw = extract_month()
     staged = validate_and_stage(raw)
     quality = quality_checks(raw)
     built = dbt_build(staged)
     wait_for_source() >> raw
     staged >> quality >> built  # GX reads the staging file, and must pass before dbt runs
-    built >> log_run(raw, staged, quality)
+    built >> log_run(raw, staged, quality) >> publish_marts()
 
 
 nyc_taxi_monthly()

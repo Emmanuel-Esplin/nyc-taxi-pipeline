@@ -1,11 +1,16 @@
 # Usage: make run MONTH=2025-01 | make backfill START=2025-01 END=2025-03 | make test
 #        make airflow-up | make airflow-backfill START=2025-01 END=2025-03 | make airflow-down
+#        make up (Airflow + Metabase) | make bi-up | make bi-bootstrap | make publish | make down
 MONTH ?= 2025-01
 START ?= 2025-01
 END   ?= 2025-03
 IMAGE ?= nyc-taxi-pipeline
 PYTHON ?= .venv/bin/python
 export PYTHONPATH := $(CURDIR)/src
+# Serving copy for BI, via the compose Postgres published on localhost:5433.
+SERVING_URL ?= postgresql://analytics_writer:local-dev-writer@localhost:5433/analytics
+CHROME ?= /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+
 # dbt reads the same paths the pipeline uses; artifacts and logs go under data/dbt/.
 DBT = PIPELINE_DATA_DIR="$(CURDIR)/data" PIPELINE_WAREHOUSE_PATH="$(CURDIR)/data/warehouse.duckdb" \
 	.venv/bin/dbt
@@ -14,7 +19,7 @@ DBT_ARGS = --project-dir dbt --profiles-dir dbt \
 DOCKER_RUN = docker run --rm -v "$(CURDIR)/data:/app/data" $(DOCKER_ENV) $(IMAGE)
 
 .PHONY: help install lint format test run backfill dbt-build docs quality-docs docker-build docker-run docker-backfill \
-	airflow-up airflow-down airflow-backfill airflow-logs clean
+	airflow-up airflow-down airflow-backfill airflow-logs up down bi-up bi-bootstrap publish screenshots clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -61,6 +66,30 @@ docker-run: docker-build ## Run one month in Docker: make docker-run MONTH=2025-
 docker-backfill: docker-build ## Backfill in Docker: make docker-backfill START=2025-01 END=2025-03
 	@mkdir -p data
 	$(DOCKER_RUN) run --start $(START) --end $(END)
+
+up: ## Start everything: Airflow (:8080), Postgres and Metabase (:3000)
+	@mkdir -p data
+	docker compose up -d --build --wait
+
+down: ## Stop everything (keeps volumes; add -v to drop them)
+	docker compose down
+
+bi-up: ## Start only Postgres + Metabase on http://localhost:3000
+	docker compose up -d --wait metabase
+
+bi-bootstrap: ## Create/update the Metabase dashboard from metabase/bootstrap.py
+	python3 metabase/bootstrap.py
+
+publish: ## Copy the serving tables from DuckDB to the compose Postgres
+	PIPELINE_SERVING_URL="$(SERVING_URL)" $(PYTHON) -m pipeline publish
+
+screenshots: ## Refresh README screenshots (Metabase dashboard + GX Data Docs) with headless Chrome
+	"$(CHROME)" --headless=new --hide-scrollbars --run-all-compositor-stages-before-draw \
+		--window-size=1600,2000 --virtual-time-budget=60000 \
+		--screenshot="$(CURDIR)/docs/img/metabase_dashboard.png" "$$(cat data/metabase_public_url.txt)"
+	"$(CHROME)" --headless=new --hide-scrollbars --window-size=1400,900 --virtual-time-budget=8000 \
+		--screenshot="$(CURDIR)/docs/img/gx_data_docs.png" \
+		"file://$(CURDIR)/data/gx/uncommitted/data_docs/local_site/index.html"
 
 airflow-up: ## Start Airflow (Postgres, api-server, scheduler) on http://localhost:8080
 	@mkdir -p data

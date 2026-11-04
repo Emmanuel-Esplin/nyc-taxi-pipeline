@@ -21,6 +21,8 @@ COPY dbt ./dbt
 # Run as an unprivileged user; outputs go to the mounted data volume.
 RUN useradd --create-home --uid 1000 pipeline && mkdir -p /app/data && chown pipeline /app/data
 USER pipeline
+# DuckDB's postgres extension, for `pipeline publish`; baked in so runs need no download.
+RUN python -c "import duckdb; duckdb.sql('INSTALL postgres')"
 VOLUME ["/app/data"]
 
 ENTRYPOINT ["python", "-m", "pipeline"]

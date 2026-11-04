@@ -39,6 +39,19 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
+    # Scratch Postgres for tests/test_publish.py (the BI serving copy).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: analytics_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PIPELINE_TEST_POSTGRES_URL: postgresql://ci:ci@localhost:5432/analytics_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,7 +68,7 @@ jobs:
           ruff check .
           ruff format --check .
       - name: Test
-        run: pytest
+        run: pytest -rs  # -rs lists skipped tests, so a silently skipped publish test shows
       # dbt docs (model descriptions, tests, lineage graph) as a single self-contained HTML
       # file, built from a fixture run so the catalog has real tables.
       - name: Build dbt docs

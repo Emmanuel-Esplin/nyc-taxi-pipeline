@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nyc-taxi-pipeline"
-version = "0.4.0"
+version = "1.0.0"
 description = "Batch pipeline: NYC TLC Yellow Taxi trips -> validated staging -> DuckDB star schema"
 readme = "README.md"
 requires-python = ">=3.12"
