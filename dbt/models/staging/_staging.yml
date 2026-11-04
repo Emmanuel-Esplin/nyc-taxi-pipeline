@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: stg_trips
+    description: Validated trips from the Python staging layer. Rejected rows never reach dbt.
+    columns:
+      - name: trip_key
+        description: md5 of the natural key; unique because duplicates were quarantined.
+      - name: year_month
+        description: Month the trip's source file covers (YYYY-MM).
+        data_tests: [not_null]
+
+  - name: stg_zones
+    description: TLC taxi zone lookup with snake_case columns.
+    columns:
+      - name: location_id
+        data_tests: [unique, not_null]

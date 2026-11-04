@@ -56,6 +56,23 @@ jobs:
           ruff format --check .
       - name: Test
         run: pytest
+      # dbt docs (model descriptions, tests, lineage graph) as a single self-contained HTML
+      # file, built from a fixture run so the catalog has real tables.
+      - name: Build dbt docs
+        if: matrix.python == '3.12'
+        env:
+          PIPELINE_SOURCE_DIR: tests/fixtures
+        run: |
+          python -m pipeline run --month 2025-01
+          PIPELINE_DATA_DIR="$PWD/data" PIPELINE_WAREHOUSE_PATH="$PWD/data/warehouse.duckdb" \
+            dbt docs generate --static --project-dir dbt --profiles-dir dbt \
+            --target-path "$PWD/data/dbt/target" --log-path "$PWD/data/dbt/logs"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.python == '3.12'
+        with:
+          name: dbt-docs
+          path: data/dbt/target/static_index.html
+          if-no-files-found: error
 
   docker:
     name: Docker smoke test

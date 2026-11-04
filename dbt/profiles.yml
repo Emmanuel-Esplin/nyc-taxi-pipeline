@@ -1,0 +1,9 @@
+# The pipeline sets PIPELINE_WAREHOUSE_PATH to an absolute path; the default suits running
+# dbt by hand from the repository root.
+nyc_taxi:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('PIPELINE_WAREHOUSE_PATH', 'data/warehouse.duckdb') }}"
+      threads: 4

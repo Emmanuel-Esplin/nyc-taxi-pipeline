@@ -1,9 +1,9 @@
 # Pipeline configuration. Any path can be overridden with an env var:
-#   PIPELINE_DATA_DIR, PIPELINE_WAREHOUSE_PATH, PIPELINE_SOURCE_DIR, PIPELINE_SQL_DIR
+#   PIPELINE_DATA_DIR, PIPELINE_WAREHOUSE_PATH, PIPELINE_SOURCE_DIR, PIPELINE_DBT_DIR
 paths:
   data_dir: data                      # raw/ and staging/ live under here
   warehouse_path: data/warehouse.duckdb
-  sql_dir: sql
+  dbt_dir: dbt                        # dbt project that builds the warehouse
 
 source:
   # Public TLC CDN. If source_dir is set, files are copied from there instead

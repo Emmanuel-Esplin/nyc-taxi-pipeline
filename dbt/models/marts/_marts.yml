@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: fact_trips
+    description: >
+      One row per validated trip. Incremental by year_month (delete+insert), so rerunning a
+      month is idempotent.
+    columns:
+      - name: trip_key
+        description: Surrogate key (md5 of the natural key).
+        data_tests: [unique, not_null]
+      - name: year_month
+        data_tests: [not_null]
+      - name: pickup_date
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - name: pu_location_id
+        description: Pickup zone.
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_zone'), field: location_id}
+      - name: do_location_id
+        description: Dropoff zone.
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_zone'), field: location_id}
+      - name: payment_type
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_payment_type'), field: payment_type}
+      - name: trip_duration_min
+        description: Minutes from pickup to dropoff; always positive after validation.
+      - name: tip_pct
+        description: Tip as a percentage of the fare; NULL when the fare is 0.
+
+  - name: dim_zone
+    description: One row per TLC taxi zone.
+    columns:
+      - name: location_id
+        data_tests: [unique, not_null]
+
+  - name: dim_date
+    description: Calendar from 2009-01-01 to 2030-12-31.
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+
+  - name: dim_payment_type
+    description: Payment type codes and descriptions.
+    columns:
+      - name: payment_type
+        data_tests: [unique, not_null]

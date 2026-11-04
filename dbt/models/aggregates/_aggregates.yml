@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: agg_daily_zone_demand
+    description: Trips, passengers and revenue per pickup zone per day.
+    data_tests:
+      - unique_combination:
+          arguments: {columns: [pickup_date, pu_location_id]}
+
+  - name: agg_hourly_revenue
+    description: Trips and revenue components per pickup date and hour.
+    data_tests:
+      - unique_combination:
+          arguments: {columns: [pickup_date, pickup_hour]}
+
+  - name: agg_payment_tip_behaviour
+    description: Tip rate and share of tipped trips by payment type, per month.
+    data_tests:
+      - unique_combination:
+          arguments: {columns: [year_month, payment_type]}

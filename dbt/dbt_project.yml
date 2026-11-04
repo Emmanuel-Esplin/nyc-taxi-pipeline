@@ -1,0 +1,32 @@
+# dbt project for the warehouse layer. Run by the pipeline after staging is written:
+#   dbt build --project-dir dbt --profiles-dir dbt --vars '{year_month: "2025-01"}'
+# Without --vars every model processes all months present in staging.
+name: nyc_taxi
+version: "1.0.0"
+config-version: 2
+profile: nyc_taxi
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+models:
+  nyc_taxi:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+    aggregates:
+      # Same strategy as fact_trips: replace only the months being processed.
+      +materialized: incremental
+      +incremental_strategy: delete+insert
+      +unique_key: year_month
+      +on_schema_change: fail
+
+seeds:
+  nyc_taxi:
+    payment_types:
+      +column_types:
+        payment_type: integer
+        payment_description: varchar

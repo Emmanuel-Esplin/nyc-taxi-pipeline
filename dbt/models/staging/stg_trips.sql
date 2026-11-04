@@ -1,0 +1,32 @@
+-- One row per validated trip, straight from the staging parquet files.
+-- Validation and typing already happened in Python; this view is the dbt entry point.
+select
+    trip_key,
+    year_month,
+    source_row,
+    vendor_id,
+    pickup_datetime,
+    dropoff_datetime,
+    pickup_date,
+    pickup_hour,
+    pickup_dow,
+    passenger_count,
+    trip_distance,
+    trip_duration_min,
+    rate_code_id,
+    store_and_fwd_flag,
+    pu_location_id,
+    do_location_id,
+    payment_type,
+    fare_amount,
+    extra,
+    mta_tax,
+    tip_amount,
+    tolls_amount,
+    improvement_surcharge,
+    congestion_surcharge,
+    airport_fee,
+    cbd_congestion_fee,
+    total_amount,
+    tip_pct
+from {{ source('pipeline', 'staging_trips') }}

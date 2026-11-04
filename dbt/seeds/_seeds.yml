@@ -1,0 +1,8 @@
+version: 2
+
+seeds:
+  - name: payment_types
+    description: Payment type codes from the TLC Yellow Taxi data dictionary (March 2025 revision).
+    columns:
+      - name: payment_type
+        data_tests: [unique, not_null]

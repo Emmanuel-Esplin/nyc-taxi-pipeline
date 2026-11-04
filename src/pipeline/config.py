@@ -13,7 +13,7 @@ DEFAULT_CONFIG = Path("config.yaml")
 ENV_OVERRIDES = {
     "PIPELINE_DATA_DIR": ("paths", "data_dir"),
     "PIPELINE_WAREHOUSE_PATH": ("paths", "warehouse_path"),
-    "PIPELINE_SQL_DIR": ("paths", "sql_dir"),
+    "PIPELINE_DBT_DIR": ("paths", "dbt_dir"),
     "PIPELINE_SOURCE_DIR": ("source", "source_dir"),
 }
 
@@ -30,7 +30,7 @@ class ValidationConfig:
 class Config:
     data_dir: Path
     warehouse_path: Path
-    sql_dir: Path
+    dbt_dir: Path
     trip_url_template: str
     zone_lookup_url: str
     source_dir: Path | None
@@ -66,7 +66,7 @@ def load_config(path: Path | str | None = None) -> Config:
     return Config(
         data_dir=Path(paths.get("data_dir", "data")),
         warehouse_path=Path(paths.get("warehouse_path", "data/warehouse.duckdb")),
-        sql_dir=Path(paths.get("sql_dir", "sql")),
+        dbt_dir=Path(paths.get("dbt_dir", "dbt")),
         trip_url_template=source["trip_url_template"],
         zone_lookup_url=source["zone_lookup_url"],
         source_dir=Path(source_dir) if source_dir else None,
