@@ -6,10 +6,13 @@
 > model it into an analytics-ready star schema, and produce reliable aggregates (demand by
 > zone/hour, revenue, tipping behaviour), with reruns that are idempotent per month.
 
-A batch pipeline in Python, DuckDB and dbt, orchestrated by Airflow, that runs locally or in
-Docker. Three months of 2025 data
-(11.2M raw rows) load from scratch with one command, rerunning a month replaces it with exactly
-the same rows, and every rejected row is kept along with the reason it was rejected.
+A batch pipeline in Python, DuckDB and dbt, orchestrated by Airflow, checked by Great
+Expectations and served to a Metabase dashboard, all from one `docker-compose.yml`. Three months
+of 2025 data (11.2M raw rows) load from scratch with one command. Rerunning a month replaces it
+with exactly the same rows, and every rejected row is kept along with the reason it was
+rejected.
+
+![Metabase dashboard](docs/img/metabase_dashboard.png)
 
 ## Architecture
 
@@ -33,6 +36,8 @@ flowchart TD
         F --> A["agg_daily_zone_demand<br/>agg_hourly_revenue<br/>agg_payment_tip_behaviour"]
         L["run_log<br/>run_rejections<br/>quality_results"]
     end
+    WH -->|"publish.py (full refresh, one transaction)"| PG[("Postgres analytics<br/>dims, aggregates, audit")]
+    PG -->|read-only role| MB[Metabase dashboard]
 ```
 
 | Stage | Module | What it does |
@@ -43,7 +48,9 @@ flowchart TD
 | Transform | [transform.py](src/pipeline/transform.py) | Derives `trip_key`, `pickup_date/hour/dow`, `trip_duration_min` and `tip_pct`, then writes the month's staging partition. |
 | Quality | [quality.py](src/pipeline/quality.py) | Runs two Great Expectations suites: a drift report on the raw file, and a blocking data contract on the staged rows. Results go to `quality_results` and Data Docs. |
 | Model | [dbt.py](src/pipeline/dbt.py), [dbt/](dbt/) | Runs `dbt build` for the month: a seed, staging views, dimensions, an incremental fact table, incremental aggregates and 22 data tests. |
-| Orchestrate | [nyc_taxi_monthly.py](airflow/dags/nyc_taxi_monthly.py) | Airflow DAG with one run per month: wait for TLC to publish the file → extract → validate and stage → dbt build → log the run. |
+| Publish | [publish.py](src/pipeline/publish.py) | Copies the dimensions, aggregates and audit tables into Postgres for BI tools. |
+| Orchestrate | [nyc_taxi_monthly.py](airflow/dags/nyc_taxi_monthly.py) | Airflow DAG with one run per month: wait for TLC to publish the file → extract → validate and stage → GX checks → dbt build → log the run → publish. |
+| Dashboard | [bootstrap.py](metabase/bootstrap.py) | Builds the Metabase dashboard through Metabase's API. |
 | Audit | [runlog.py](src/pipeline/runlog.py) | Adds one `run_log` row per run (including failed runs) and per-rule counts to `run_rejections`. |
 
 ## Running it
@@ -62,11 +69,17 @@ make quality-docs                         # Great Expectations Data Docs (every 
 make docker-run MONTH=2025-01
 make docker-backfill START=2025-01 END=2025-03
 
-# Airflow (docker compose): UI on http://localhost:8080, no login needed locally
+# The full stack (docker compose): Airflow on :8080, Metabase on :3000
 cp .env.example .env                      # optional: bound the months the DAG schedules
-make airflow-up                           # Postgres + api-server + scheduler + dag-processor
-make airflow-backfill START=2025-01 END=2025-03
-make airflow-down
+make up                                   # Postgres, Airflow, Metabase
+make airflow-backfill START=2025-01 END=2025-03   # each run ends by publishing to Postgres
+make bi-bootstrap                         # build/update the dashboard; prints a public link
+make down
+
+# Pieces on their own
+make airflow-up | make bi-up              # just Airflow, or just Postgres + Metabase
+make publish                              # copy serving tables from a local (CLI) run
+make screenshots                          # refresh the README images with headless Chrome
 ```
 
 You can also call the CLI directly with `python -m pipeline run --month 2025-01` or
@@ -115,6 +128,37 @@ flowchart LR
 - **CI runs the DAG for real.** The `Airflow DAG test` job builds the image, checks the DAG
   imports cleanly, runs `airflow dags test` on the fixture month, and asserts what landed in
   `run_log` and `fact_trips`.
+
+![Airflow grid: three catchup runs, every task green](docs/img/airflow_grid.png)
+
+## Serving and dashboard (Postgres + Metabase)
+
+**DuckDB is the warehouse; Postgres is the serving layer.** DuckDB lets only one process write,
+and a writer locks every other process out of the file. A dashboard holding
+`warehouse.duckdb` open would therefore block the pipeline, and a load would break the
+dashboard. So the last task of each run, `publish_marts`, copies the serving tables
+(dimensions, aggregates, `run_log`, `run_rejections` and `quality_results`, about 23k rows)
+into a Postgres `analytics` database. Metabase reads it with its built-in Postgres driver,
+with no third-party DuckDB plugin. `fact_trips` (8.65M rows) stays in DuckDB.
+
+- **Atomic full refresh.** Every publish drops and recreates the tables inside one Postgres
+  transaction, so the dashboard sees either the previous version or the new one, never a
+  partial one. It takes about 3 s.
+- **Least privilege.** [setup-serving.sh](docker/postgres/setup-serving.sh) creates three
+  roles: `analytics_writer` (the pipeline), `metabase_reader` (SELECT only, including on tables
+  created later, via default privileges) and `metabase_app` (Metabase's own database). It is
+  idempotent, so it runs on every `docker compose up`.
+- **Publishing is separate from loading.** If Postgres is down, the month still loads and is
+  still logged, and `publish_marts` retries on its own. Without `PIPELINE_SERVING_URL`
+  (CLI runs, CI fixtures) publishing is skipped.
+- **The dashboard is code.** [metabase/bootstrap.py](metabase/bootstrap.py) (standard
+  library only) completes Metabase's first-time setup, connects the database through the
+  read-only role, and creates or updates 11 native-SQL questions and the dashboard layout.
+  Re-running it updates the same objects in place, and the README screenshot is taken from the
+  dashboard's public link.
+- **Timestamps are UTC.** `run_log` used to record local time on a laptop and UTC in
+  containers, which the dashboard's run history exposed. Every timestamp is now naive UTC
+  (`runlog.utcnow()`).
 
 ## Data quality rules
 
@@ -216,6 +260,9 @@ flowchart LR
   deterministic, so recovering from a failed run just means rerunning the month. Tests prove
   that a rerun gives identical rows in every table, and that a broken model fails the run,
   logs it as `failed`, and leaves every table consistent.
+- **A Postgres serving copy instead of a DuckDB driver for BI.** It removes the file-lock
+  conflict between the pipeline and the dashboard, uses Metabase's first-party driver, and
+  limits the BI role to `SELECT` on curated tables.
 - **GX adds a second check rather than replacing the rule engine.** Quarantine
   stays in SQL, where it runs fast and records the reason for each row. GX adds what it does
   well: a check written independently of the rules, a blocking contract, drift thresholds,
@@ -272,8 +319,9 @@ flowchart LR
 ```text
 src/pipeline/          cli, config, extract, schema, rules, validate, transform, dbt, runlog
 airflow/dags/          nyc_taxi_monthly DAG
-docker/                Airflow image (pipeline + dbt in its own venv)
-docker-compose.yml     Airflow stack: Postgres, api-server, scheduler, dag-processor
+docker/                Airflow image (pipeline + dbt in its own venv); Postgres serving setup
+docker-compose.yml     Full stack: Postgres, Airflow (api-server, scheduler, dag-processor), Metabase
+metabase/              bootstrap.py: the dashboard as code
 dbt/models/staging/    stg_trips, stg_zones (views over the pipeline's files)
 dbt/models/marts/      dim_zone, dim_date, dim_payment_type, fact_trips
 dbt/models/aggregates/ agg_daily_zone_demand, agg_hourly_revenue, agg_payment_tip_behaviour
@@ -294,9 +342,9 @@ include the 22 out-of-month trips in 3.5M rows.
 | `sql/` run by Python | dbt with `dbt-duckdb`: staging → marts, data tests, docs with a lineage graph | ✅ Done |
 | CLI + Makefile loop for backfills | Airflow DAG: monthly schedule, `catchup=True`, extract → validate → load → dbt | ✅ Done |
 | `rules.py` | Great Expectations (GX Core 1.x) suite at the raw → staging boundary, keeping the quarantine logic | ✅ Done |
-| README tables | Metabase dashboard on the marts, with screenshots committed to the repo | Next |
+| README tables | Metabase dashboard on the marts (served from Postgres), with screenshots committed to the repo | ✅ Done |
 
-All of these will run from a single `docker-compose.yml`.
+All of these run from a single `docker-compose.yml` (`make up`).
 
 ## Data source
 
