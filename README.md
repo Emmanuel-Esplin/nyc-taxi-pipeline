@@ -6,7 +6,8 @@
 > model it into an analytics-ready star schema, and produce reliable aggregates (demand by
 > zone/hour, revenue, tipping behaviour), with reruns that are idempotent per month.
 
-A batch pipeline in Python, DuckDB and dbt that runs locally or in Docker. Three months of 2025 data
+A batch pipeline in Python, DuckDB and dbt, orchestrated by Airflow, that runs locally or in
+Docker. Three months of 2025 data
 (11.2M raw rows) load from scratch with one command, rerunning a month replaces it with exactly
 the same rows, and every rejected row is kept along with the reason it was rejected.
 
@@ -33,12 +34,13 @@ flowchart TD
 ```
 
 | Stage | Module | What it does |
-|---|---|---|
+| --- | --- | --- |
 | Extract | [extract.py](src/pipeline/extract.py) | Downloads the month's file and the zone lookup. Skips the download if a raw file of the same size already exists. Writes go to a `.part` file that is then renamed, so a crash never leaves a partial file behind. |
 | Type | [schema.py](src/pipeline/schema.py) | Maps raw columns to snake_case names without regard to case, using `TRY_CAST`. Columns missing from older files become typed NULLs. |
 | Validate | [rules.py](src/pipeline/rules.py), [validate.py](src/pipeline/validate.py) | Tags each row with every rule it fails, then splits the rows into clean and quarantined. |
 | Transform | [transform.py](src/pipeline/transform.py) | Derives `trip_key`, `pickup_date/hour/dow`, `trip_duration_min` and `tip_pct`, then writes the month's staging partition. |
 | Model | [dbt.py](src/pipeline/dbt.py), [dbt/](dbt/) | Runs `dbt build` for the month: a seed, staging views, dimensions, an incremental fact table, incremental aggregates and 22 data tests. |
+| Orchestrate | [nyc_taxi_monthly.py](airflow/dags/nyc_taxi_monthly.py) | Airflow DAG with one run per month: wait for TLC to publish the file → extract → validate and stage → dbt build → log the run. |
 | Audit | [runlog.py](src/pipeline/runlog.py) | Adds one `run_log` row per run (including failed runs) and per-rule counts to `run_rejections`. |
 
 ## Running it
@@ -55,6 +57,12 @@ make docs                                 # dbt docs with the lineage graph on l
 # Docker: no local Python needed. Outputs land in ./data
 make docker-run MONTH=2025-01
 make docker-backfill START=2025-01 END=2025-03
+
+# Airflow (docker compose): UI on http://localhost:8080, no login needed locally
+cp .env.example .env                      # optional: bound the months the DAG schedules
+make airflow-up                           # Postgres + api-server + scheduler + dag-processor
+make airflow-backfill START=2025-01 END=2025-03
+make airflow-down
 ```
 
 You can also call the CLI directly with `python -m pipeline run --month 2025-01` or
@@ -63,6 +71,46 @@ hard-coded paths. Paths can be overridden with `PIPELINE_DATA_DIR`, `PIPELINE_WA
 `PIPELINE_DBT_DIR` and `PIPELINE_SOURCE_DIR`. The last one points at a folder of
 pre-downloaded files, which is how the tests and CI run offline.
 
+> **macOS note:** if the repository is in an iCloud-synced folder (Desktop or Documents with
+> "Optimize Mac Storage"), iCloud can offload files in `.venv/` and `data/`. Python then
+> hangs reading them, and Docker can't read them at all. Keep both out of sync by renaming
+> them with a `.nosync` suffix and symlinking them back:
+> `mv data data.nosync && ln -s data.nosync data` (git already ignores both).
+
+## Orchestration (Airflow)
+
+```mermaid
+flowchart LR
+    W["wait_for_source<br/>(sensor, reschedule mode)"] --> E[extract_month] --> V[validate_and_stage] --> B[dbt_build] --> L[log_run]
+    E -. XCom: paths, row counts .-> L
+    V -. XCom: rule counts .-> L
+```
+
+- **One DAG run per month.** The schedule is `@monthly` with `catchup=True` from
+  `PIPELINE_START_MONTH`, so turning the DAG on backfills every month since then, and each new
+  month is picked up automatically. `PIPELINE_END_MONTH` sets an upper bound, and the
+  `month` param re-processes one specific month from the UI.
+- **The DAG waits for TLC to publish.** TLC releases each month about two months late, and its
+  CDN returns 403 until the file exists. The sensor checks every 12 hours, for up to 90 days,
+  in `reschedule` mode, so it doesn't hold a worker slot while it waits.
+- **One data task at a time, enforced by a pool.** DuckDB allows a single writer, and
+  validating a month needs a few GB of memory. Every data task runs in the one-slot
+  `nyc_taxi_pipeline` pool. `max_active_runs=1` is not enough: Airflow 3 backfills have their
+  own concurrency setting and ignore it. An early backfill here ran three months at once,
+  which caused DuckDB lock errors and an out-of-memory kill. The sensor stays outside the
+  pool, so waiting for TLC never blocks other work.
+- **Tasks call the same stage functions as the CLI** (`pipeline.pipeline`), so
+  `make run` and Airflow behave the same way. Tasks pass only small JSON values (paths and
+  counts) through XCom. The data stays on the shared `./data` volume.
+- **Failures are logged.** An `on_failure_callback` writes a `failed` row to `run_log` naming
+  the task and the error, and tasks retry twice, 10 minutes apart. `PIPELINE_TASK_RETRIES`
+  can lower this, and CI sets it to 0.
+- **dbt has its own virtualenv in the Airflow image**, because its dependency pins conflict
+  with Airflow's. The pipeline calls it through `PIPELINE_DBT_BIN`.
+- **CI runs the DAG for real.** The `Airflow DAG test` job builds the image, checks the DAG
+  imports cleanly, runs `airflow dags test` on the fixture month, and asserts what landed in
+  `run_log` and `fact_trips`.
+
 ## Data quality rules
 
 Rules are SQL predicates that are TRUE when a row **fails**. A NULL result also counts as a
@@ -70,7 +118,7 @@ failure: if a row can't be shown to be valid, it is quarantined. Thresholds are 
 `config.yaml`.
 
 | Rule | Check | 2025-01 | 2025-02 | 2025-03 |
-|---|---|--:|--:|--:|
+| --- | --- | ---: | ---: | ---: |
 | `pickup_in_file_month` | Pickup falls inside the file's month | 22 | 31 | 33 |
 | `dropoff_after_pickup` | Dropoff is strictly after pickup | 2,051 | 5,164 | 22,280 |
 | `trip_duration_plausible` | Trip lasts < 24 h | 20 | 16 | 11 |
@@ -136,6 +184,9 @@ flowchart LR
   deterministic, so recovering from a failed run just means rerunning the month. Tests prove
   that a rerun gives identical rows in every table, and that a broken model fails the run,
   logs it as `failed`, and leaves every table consistent.
+- **Airflow orchestrates; it doesn't hold the logic.** Every task is a thin wrapper around a
+  function the CLI also uses, so the pipeline runs and is tested without Airflow, and the DAG
+  only adds scheduling, retries, waiting for the file, and visibility.
 - **dbt runs as a subprocess, not in-process.** dbt-duckdb holds the database file open after
   an in-process run, which blocks the pipeline's own connections. A subprocess releases the
   file when it exits, and it is also how Airflow will call dbt. Failed nodes are read from
@@ -179,8 +230,11 @@ flowchart LR
 
 ## Project layout
 
-```
+```text
 src/pipeline/          cli, config, extract, schema, rules, validate, transform, dbt, runlog
+airflow/dags/          nyc_taxi_monthly DAG
+docker/                Airflow image (pipeline + dbt in its own venv)
+docker-compose.yml     Airflow stack: Postgres, api-server, scheduler, dag-processor
 dbt/models/staging/    stg_trips, stg_zones (views over the pipeline's files)
 dbt/models/marts/      dim_zone, dim_date, dim_payment_type, fact_trips
 dbt/models/aggregates/ agg_daily_zone_demand, agg_hourly_revenue, agg_payment_tip_behaviour
@@ -196,10 +250,10 @@ include the 22 out-of-month trips in 3.5M rows.
 ## Roadmap: Phase 2
 
 | Phase 1 piece | Phase 2 replacement | Status |
-|---|---|---|
+| --- | --- | --- |
 | `sql/` run by Python | dbt with `dbt-duckdb`: staging → marts, data tests, docs with a lineage graph | ✅ Done |
-| CLI + Makefile loop for backfills | Airflow DAG: monthly schedule, `catchup=True`, extract → validate → load → dbt | Next |
-| `rules.py` | Great Expectations (GX Core 1.x) suite at the raw → staging boundary, keeping the quarantine logic | Planned |
+| CLI + Makefile loop for backfills | Airflow DAG: monthly schedule, `catchup=True`, extract → validate → load → dbt | ✅ Done |
+| `rules.py` | Great Expectations (GX Core 1.x) suite at the raw → staging boundary, keeping the quarantine logic | Next |
 | README tables | Metabase dashboard on the marts, with screenshots committed to the repo | Planned |
 
 All of these will run from a single `docker-compose.yml`.
