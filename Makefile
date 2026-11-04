@@ -13,7 +13,7 @@ DBT_ARGS = --project-dir dbt --profiles-dir dbt \
 	--target-path "$(CURDIR)/data/dbt/target" --log-path "$(CURDIR)/data/dbt/logs"
 DOCKER_RUN = docker run --rm -v "$(CURDIR)/data:/app/data" $(DOCKER_ENV) $(IMAGE)
 
-.PHONY: help install lint format test run backfill dbt-build docs docker-build docker-run docker-backfill \
+.PHONY: help install lint format test run backfill dbt-build docs quality-docs docker-build docker-run docker-backfill \
 	airflow-up airflow-down airflow-backfill airflow-logs clean
 
 help:
@@ -46,6 +46,10 @@ dbt-build: ## Rebuild and test every warehouse model over all staged months
 docs: ## Generate dbt docs (lineage graph) and serve them on http://localhost:8080
 	$(DBT) docs generate $(DBT_ARGS)
 	$(DBT) docs serve $(DBT_ARGS) --port 8080
+
+quality-docs: ## Open the Great Expectations Data Docs (validation history per month)
+	open "$(CURDIR)/data/gx/uncommitted/data_docs/local_site/index.html" 2>/dev/null || \
+		xdg-open "$(CURDIR)/data/gx/uncommitted/data_docs/local_site/index.html"
 
 docker-build: ## Build the pipeline image
 	docker build -t $(IMAGE) .

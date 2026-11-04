@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS run_rejections (
     rule         VARCHAR NOT NULL,
     rows_failed  BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS quality_results (
+    run_id               VARCHAR NOT NULL,
+    year_month           VARCHAR NOT NULL,
+    suite                VARCHAR NOT NULL,   -- raw_trips | staging_trips
+    blocking             BOOLEAN NOT NULL,   -- staging_trips is the data contract
+    success              BOOLEAN NOT NULL,
+    evaluated            INTEGER NOT NULL,
+    successful           INTEGER NOT NULL,
+    failed_expectations  VARCHAR[]
+);
 """
 
 
@@ -51,6 +61,8 @@ class RunRecord:
     rows_rejected: int | None = None
     error: str | None = None
     failures_by_rule: dict[str, int] = field(default_factory=dict)
+    # One dict per GX suite (pipeline.quality.SuiteResult as a dict).
+    quality_results: list[dict] = field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float:
@@ -88,3 +100,12 @@ def record_run(con: duckdb.DuckDBPyConnection, run: RunRecord) -> None:
             "INSERT INTO run_rejections VALUES (?, ?, ?, ?)",
             [[run.run_id, run.year_month, r, n] for r, n in run.failures_by_rule.items()],
         )
+    if run.quality_results:
+        con.executemany(
+            "INSERT INTO quality_results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                [run.run_id, run.year_month, q["suite"], q["blocking"], q["success"],
+                 q["evaluated"], q["successful"], q["failed_expectations"]]
+                for q in run.quality_results
+            ],
+        )  # fmt: skip

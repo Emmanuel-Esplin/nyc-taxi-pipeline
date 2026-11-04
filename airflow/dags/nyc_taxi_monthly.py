@@ -3,7 +3,7 @@
 Each DAG run processes the month of its data interval: the run for 2025-01-01 loads
 January 2025. Tasks call the same stage functions as the CLI (`pipeline.pipeline`):
 
-    wait_for_source -> extract -> validate_and_stage -> dbt_build -> log_run
+    wait_for_source -> extract -> validate_and_stage -> quality_checks -> dbt_build -> log_run
 
 Configuration comes from the environment (see docker-compose.yml):
     PIPELINE_START_MONTH  first month to load (default 2025-01); catchup backfills from here
@@ -27,6 +27,7 @@ from pipeline import pipeline
 from pipeline.config import Config, load_config
 from pipeline.extract import ExtractResult, extract, source_available
 from pipeline.months import Month
+from pipeline.quality import check_quality
 from pipeline.runlog import RunRecord
 
 CONFIG_PATH = os.environ.get("PIPELINE_CONFIG", "/opt/pipeline/config.yaml")
@@ -141,11 +142,22 @@ def nyc_taxi_monthly():
         return asdict(result)
 
     @task
+    def quality_checks(raw: dict) -> list[dict]:
+        # Raises QualityError (failing the run) only if the staging contract is broken.
+        results = check_quality(
+            _config(),
+            _month(get_current_context()),
+            Path(raw["trips_path"]),
+            Path(raw["zones_path"]),
+        )
+        return [asdict(r) for r in results]
+
+    @task
     def dbt_build(staged: dict) -> None:
         pipeline.load(_config(), _month(get_current_context()), staged["rows_staged"])
 
     @task
-    def log_run(raw: dict, staged: dict) -> None:
+    def log_run(raw: dict, staged: dict, quality: list[dict]) -> None:
         context = get_current_context()
         run = RunRecord(
             run_id=f"airflow:{context['dag_run'].run_id}:{uuid.uuid4().hex[:8]}",
@@ -159,14 +171,17 @@ def nyc_taxi_monthly():
             rows_clean=staged["rows_clean"],
             rows_rejected=staged["rows_rejected"],
             failures_by_rule=staged["failures_by_rule"],
+            quality_results=quality,
         )
         pipeline.log_run(_config(), run)
 
     raw = extract_month()
     staged = validate_and_stage(raw)
+    quality = quality_checks(raw)
     built = dbt_build(staged)
     wait_for_source() >> raw
-    built >> log_run(raw, staged)
+    staged >> quality >> built  # GX reads the staging file, and must pass before dbt runs
+    built >> log_run(raw, staged, quality)
 
 
 nyc_taxi_monthly()

@@ -123,3 +123,14 @@ def test_failed_build_is_logged_and_leaves_data_consistent(config, tmp_path):
         ("success",),
         ("failed",),
     ]
+
+
+def test_both_quality_suites_are_recorded_per_run(config):
+    run = run_month(config, MONTH)
+    rows = query(
+        config,
+        "SELECT suite, blocking, success FROM quality_results WHERE run_id = "
+        f"'{run.run_id}' ORDER BY suite",
+    )
+    # The fixture's over-sampled edge cases trip the raw drift suite; the contract holds.
+    assert rows == [("raw_trips", False, False), ("staging_trips", True, True)]

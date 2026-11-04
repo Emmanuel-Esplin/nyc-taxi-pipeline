@@ -1,10 +1,10 @@
-"""Orchestrate one month: extract -> validate -> transform -> dbt build -> run_log."""
+"""Orchestrate one month: extract -> validate -> stage -> GX checks -> dbt build -> run_log."""
 
 from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 
 import duckdb
@@ -13,6 +13,7 @@ from pipeline.config import Config
 from pipeline.dbt import dbt_build
 from pipeline.extract import ExtractResult, extract
 from pipeline.months import Month
+from pipeline.quality import check_quality
 from pipeline.rules import build_rules
 from pipeline.runlog import RunRecord, record_run
 from pipeline.schema import TYPED_VIEW, create_typed_view, load_zone_lookup
@@ -94,10 +95,14 @@ def run_month(config: Config, month: Month) -> RunRecord:
         run.rows_in, run.rows_clean = staged.rows_in, staged.rows_clean
         run.rows_rejected, run.failures_by_rule = staged.rows_rejected, staged.failures_by_rule
 
-        # 4. Model: dbt builds dimensions, fact and aggregates and runs the data tests.
+        # 4. Quality: GX drift report on raw, and the blocking data contract on staging.
+        quality = check_quality(config, month, raw.trips_path, raw.zones_path)
+        run.quality_results = [asdict(q) for q in quality]
+
+        # 5. Model: dbt builds dimensions, fact and aggregates and runs the data tests.
         load(config, month, staged.rows_staged)
 
-        # 5. Record success.
+        # 6. Record success.
         run.status, run.finished_at = "success", datetime.now()
         log_run(config, run)
     except Exception as exc:

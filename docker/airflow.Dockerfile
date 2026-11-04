@@ -14,10 +14,12 @@ RUN python -m venv /opt/dbt-venv \
     && /opt/dbt-venv/bin/pip install --no-cache-dir -c /opt/pipeline/requirements.lock dbt-duckdb duckdb
 
 # The pipeline package itself, into Airflow's environment. --no-deps keeps Airflow's pinned
-# versions; duckdb is the only extra runtime dependency it needs (pyyaml ships with Airflow).
+# versions; its runtime needs beyond Airflow are duckdb and Great Expectations, installed
+# alongside apache-airflow so pip must find versions that satisfy both.
 COPY --chown=airflow:root pyproject.toml README.md /opt/pipeline/
 COPY --chown=airflow:root src /opt/pipeline/src
 RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" duckdb==1.5.6 \
+        great_expectations==1.24.1 \
     && pip install --no-cache-dir --no-deps /opt/pipeline
 
 COPY --chown=airflow:root config.yaml /opt/pipeline/
