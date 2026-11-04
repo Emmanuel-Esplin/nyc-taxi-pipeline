@@ -20,8 +20,10 @@ reprocessed without touching the other months.
 flowchart TD
     SRC["TLC CDN<br/>monthly parquet + zone lookup CSV"] -->|extract.py| RAW
     RAW["data/raw/<br/>files exactly as downloaded, never modified"] -->|"schema.py → validate.py"| SPLIT{rules.py}
+    RAW -.->|"GX raw_trips (drift report)"| GX[(Data Docs +<br/>quality_results)]
     SPLIT -->|clean| STG["data/staging/trips/year=/month=/<br/>typed, deduplicated, derived columns"]
     SPLIT -->|failed ≥1 rule| REJ["data/staging/rejected/year=/month=/<br/>row + every rule it failed"]
+    STG -.->|"GX staging_trips (blocking contract)"| GX
     STG -->|"dbt build (models + data tests)"| WH
     subgraph WH["warehouse.duckdb (built by dbt)"]
         direction LR
@@ -29,7 +31,7 @@ flowchart TD
         F --- D2[dim_date]
         F --- D3[dim_payment_type]
         F --> A["agg_daily_zone_demand<br/>agg_hourly_revenue<br/>agg_payment_tip_behaviour"]
-        L["run_log<br/>run_rejections"]
+        L["run_log<br/>run_rejections<br/>quality_results"]
     end
 ```
 
@@ -39,6 +41,7 @@ flowchart TD
 | Type | [schema.py](src/pipeline/schema.py) | Maps raw columns to snake_case names without regard to case, using `TRY_CAST`. Columns missing from older files become typed NULLs. |
 | Validate | [rules.py](src/pipeline/rules.py), [validate.py](src/pipeline/validate.py) | Tags each row with every rule it fails, then splits the rows into clean and quarantined. |
 | Transform | [transform.py](src/pipeline/transform.py) | Derives `trip_key`, `pickup_date/hour/dow`, `trip_duration_min` and `tip_pct`, then writes the month's staging partition. |
+| Quality | [quality.py](src/pipeline/quality.py) | Runs two Great Expectations suites: a drift report on the raw file, and a blocking data contract on the staged rows. Results go to `quality_results` and Data Docs. |
 | Model | [dbt.py](src/pipeline/dbt.py), [dbt/](dbt/) | Runs `dbt build` for the month: a seed, staging views, dimensions, an incremental fact table, incremental aggregates and 22 data tests. |
 | Orchestrate | [nyc_taxi_monthly.py](airflow/dags/nyc_taxi_monthly.py) | Airflow DAG with one run per month: wait for TLC to publish the file → extract → validate and stage → dbt build → log the run. |
 | Audit | [runlog.py](src/pipeline/runlog.py) | Adds one `run_log` row per run (including failed runs) and per-rule counts to `run_rejections`. |
@@ -53,6 +56,7 @@ make test                                 # unit + integration tests
 make lint                                 # ruff
 make dbt-build                            # rebuild + test every model over all staged months
 make docs                                 # dbt docs with the lineage graph on localhost:8080
+make quality-docs                         # Great Expectations Data Docs (every validation run)
 
 # Docker: no local Python needed. Outputs land in ./data
 make docker-run MONTH=2025-01
@@ -81,9 +85,10 @@ pre-downloaded files, which is how the tests and CI run offline.
 
 ```mermaid
 flowchart LR
-    W["wait_for_source<br/>(sensor, reschedule mode)"] --> E[extract_month] --> V[validate_and_stage] --> B[dbt_build] --> L[log_run]
+    W["wait_for_source<br/>(sensor, reschedule mode)"] --> E[extract_month] --> V[validate_and_stage] --> Q[quality_checks] --> B[dbt_build] --> L[log_run]
     E -. XCom: paths, row counts .-> L
     V -. XCom: rule counts .-> L
+    Q -. XCom: suite results .-> L
 ```
 
 - **One DAG run per month.** The schedule is `@monthly` with `catchup=True` from
@@ -139,6 +144,32 @@ Every run is reconciled: the row count in the raw file's parquet footer must equ
 read, clean rows must equal staged rows, and staged rows must equal the rows loaded into
 `fact_trips`. If any count doesn't match, the run fails and is logged as `failed`.
 
+## Great Expectations: drift report and data contract
+
+`rules.py` decides which rows are quarantined. Great Expectations
+([quality.py](src/pipeline/quality.py)) sits next to it at the raw → staging boundary and does two
+different jobs:
+
+| Suite | Runs on | Blocks the run? | Purpose |
+| --- | --- | --- | --- |
+| `raw_trips` | the raw TLC file | No (`severity: warning`) | **Drift report.** Loose `mostly` thresholds, such as "passenger_count is null on fewer than 30% of rows". Bad raw rows are expected, and quarantine handles them. The suite shows when the source changes enough to deserve a look. |
+| `staging_trips` | the staged (clean) rows | **Yes** | **Data contract.** Every validation rule must hold for 100% of staged rows, plus checks the rule engine doesn't make: `trip_key` unique, `year_month` correct, `pickup_hour` 0–23, `pickup_dow` 1–7, and `trip_duration_min` inside the allowed window. |
+
+The contract re-checks the rules independently: GX implements them separately from `rules.py`'s
+SQL. If the two ever disagree, the run fails with `QualityError` and nothing reaches dbt. A test
+plants a zero-passenger row in staging to prove this. Both suites are defined in code and rebuilt
+every run, so the Python file is their single source of truth. GX's file context lives under
+`data/gx/`, so Data Docs build up a validation history month by month.
+
+On Jan–Mar 2025 all 10 raw expectations and all 17 contract expectations pass. The raw
+`passenger_count` threshold is the one to watch: February and March are about 23% null against
+a 30% limit. The test fixture over-samples rare failures, so on it the raw suite (correctly)
+fails four drift checks while the contract passes.
+
+| Validation history (Data Docs) | Staging contract, January 2025 |
+| --- | --- |
+| ![GX Data Docs index](docs/img/gx_data_docs.png) | ![GX staging contract](docs/img/gx_staging_contract.png) |
+
 ## Warehouse models (dbt)
 
 ```mermaid
@@ -170,8 +201,9 @@ flowchart LR
 ## Key design decisions
 
 - **DuckDB, not Pandas, does the heavy lifting.** DuckDB reads parquet directly, runs in
-  parallel and can spill to disk. A month validates and stages in about 2 s, and the dbt
-  build takes about 5 s more, most of which is dbt starting up. Pandas is used only to build the small, hand-made DataFrames in the unit tests.
+  parallel and can spill to disk. A month validates and stages in about 2 s. The GX suites
+  add about 15 s (GX validates in pandas, so only the checked columns are loaded), and the
+  dbt build about 5 s. Pandas is used only to build the small, hand-made DataFrames in the unit tests.
   Pushing 3–4M rows through Pandas row-wise is where memory problems start.
 - **Rules are declared in Python and executed in SQL.** `rules.py` is the one place to read,
   test and document the rules, and the engine compiles them into a single vectorised query.
@@ -184,6 +216,13 @@ flowchart LR
   deterministic, so recovering from a failed run just means rerunning the month. Tests prove
   that a rerun gives identical rows in every table, and that a broken model fails the run,
   logs it as `failed`, and leaves every table consistent.
+- **GX adds a second check rather than replacing the rule engine.** Quarantine
+  stays in SQL, where it runs fast and records the reason for each row. GX adds what it does
+  well: a check written independently of the rules, a blocking contract, drift thresholds,
+  and browsable validation history.
+- **GX date bounds must be `datetime` objects.** Given string bounds on a datetime column, GX
+  quietly reports failure with no exception and no unexpected count. That caught the first
+  version of the contract, and `_bounds()` now builds real datetimes.
 - **Airflow orchestrates; it doesn't hold the logic.** Every task is a thin wrapper around a
   function the CLI also uses, so the pipeline runs and is tested without Airflow, and the DAG
   only adds scheduling, retries, waiting for the file, and visibility.
@@ -239,7 +278,8 @@ dbt/models/staging/    stg_trips, stg_zones (views over the pipeline's files)
 dbt/models/marts/      dim_zone, dim_date, dim_payment_type, fact_trips
 dbt/models/aggregates/ agg_daily_zone_demand, agg_hourly_revenue, agg_payment_tip_behaviour
 dbt/tests/             tie-out test + generic unique_combination test
-tests/                 rule unit tests, integration + idempotency + failure tests
+tests/                 rule unit tests, GX suite tests, integration + idempotency + failure tests
+docs/img/              screenshots used in this README
 tests/fixtures/   10k-row sample of 2025-01 + zone lookup (built by scripts/make_fixture.py)
 ```
 
@@ -253,8 +293,8 @@ include the 22 out-of-month trips in 3.5M rows.
 | --- | --- | --- |
 | `sql/` run by Python | dbt with `dbt-duckdb`: staging → marts, data tests, docs with a lineage graph | ✅ Done |
 | CLI + Makefile loop for backfills | Airflow DAG: monthly schedule, `catchup=True`, extract → validate → load → dbt | ✅ Done |
-| `rules.py` | Great Expectations (GX Core 1.x) suite at the raw → staging boundary, keeping the quarantine logic | Next |
-| README tables | Metabase dashboard on the marts, with screenshots committed to the repo | Planned |
+| `rules.py` | Great Expectations (GX Core 1.x) suite at the raw → staging boundary, keeping the quarantine logic | ✅ Done |
+| README tables | Metabase dashboard on the marts, with screenshots committed to the repo | Next |
 
 All of these will run from a single `docker-compose.yml`.
 
