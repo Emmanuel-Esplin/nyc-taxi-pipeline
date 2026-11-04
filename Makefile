@@ -1,4 +1,5 @@
 # Usage: make run MONTH=2025-01 | make backfill START=2025-01 END=2025-03 | make test
+#        make airflow-up | make airflow-backfill START=2025-01 END=2025-03 | make airflow-down
 MONTH ?= 2025-01
 START ?= 2025-01
 END   ?= 2025-03
@@ -12,7 +13,8 @@ DBT_ARGS = --project-dir dbt --profiles-dir dbt \
 	--target-path "$(CURDIR)/data/dbt/target" --log-path "$(CURDIR)/data/dbt/logs"
 DOCKER_RUN = docker run --rm -v "$(CURDIR)/data:/app/data" $(DOCKER_ENV) $(IMAGE)
 
-.PHONY: help install lint format test run backfill dbt-build docs docker-build docker-run docker-backfill clean
+.PHONY: help install lint format test run backfill dbt-build docs docker-build docker-run docker-backfill \
+	airflow-up airflow-down airflow-backfill airflow-logs clean
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -55,6 +57,21 @@ docker-run: docker-build ## Run one month in Docker: make docker-run MONTH=2025-
 docker-backfill: docker-build ## Backfill in Docker: make docker-backfill START=2025-01 END=2025-03
 	@mkdir -p data
 	$(DOCKER_RUN) run --start $(START) --end $(END)
+
+airflow-up: ## Start Airflow (Postgres, api-server, scheduler) on http://localhost:8080
+	@mkdir -p data
+	docker compose up -d --build --wait
+
+airflow-down: ## Stop Airflow (keeps the metadata DB volume; add -v to drop it)
+	docker compose down
+
+airflow-backfill: ## Backfill via Airflow: make airflow-backfill START=2025-01 END=2025-03
+	docker compose exec airflow-scheduler airflow dags unpause nyc_taxi_monthly
+	docker compose exec airflow-scheduler airflow backfill create --dag-id nyc_taxi_monthly \
+		--from-date $(START)-01 --to-date $(END)-01 --reprocess-behavior completed --max-active-runs 1
+
+airflow-logs: ## Follow scheduler logs
+	docker compose logs -f airflow-scheduler
 
 clean: ## Delete all pipeline outputs (raw, staging, warehouse)
 	rm -rf data/raw data/staging data/dbt data/warehouse.duckdb
