@@ -29,8 +29,12 @@ class DbtBuildError(RuntimeError):
 
 
 def dbt_executable() -> str:
-    """The dbt installed alongside this Python, so the venv/image's dbt is always used."""
-    return str(Path(sys.executable).with_name("dbt"))
+    """PIPELINE_DBT_BIN if set, else the dbt installed alongside this Python.
+
+    The Airflow image installs dbt in its own virtualenv (its dependencies conflict with
+    Airflow's) and points PIPELINE_DBT_BIN at it.
+    """
+    return os.environ.get("PIPELINE_DBT_BIN") or str(Path(sys.executable).with_name("dbt"))
 
 
 def dbt_build(config: Config, month: Month) -> None:

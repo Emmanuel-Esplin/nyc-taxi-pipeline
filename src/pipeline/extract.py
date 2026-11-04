@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,22 @@ def extract(config: Config, month: Month) -> ExtractResult:
     size = trips_path.stat().st_size
     log.info("raw %s: %s rows, %.1f MB", trips_path.name, f"{rows:,}", size / 1e6)
     return ExtractResult(trips_path, zones_path, rows, size, downloaded)
+
+
+def source_available(config: Config, month: Month) -> bool:
+    """True once the month's file has been published (or exists in source_dir).
+
+    TLC publishes with a lag of about two months, so a scheduler polls this before extracting.
+    """
+    if config.source_dir:
+        return (config.source_dir / trip_filename(month)).exists()
+    url = config.trip_url_template.format(year_month=month.key)
+    try:
+        return _remote_size(url, config.timeout_seconds) is not None
+    except urllib.error.HTTPError as exc:
+        if exc.code in {403, 404}:  # the CDN answers 403 for files that do not exist yet
+            return False
+        raise
 
 
 def parquet_row_count(path: Path) -> int:
