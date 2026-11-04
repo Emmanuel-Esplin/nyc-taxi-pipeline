@@ -10,31 +10,58 @@ the README screenshot is taken from.
 
 Standard library only, so it runs from the host with any Python 3.11+.
 
-Environment (all optional; defaults match docker-compose.yml for local use):
-    MB_URL                    http://localhost:3000
-    MB_ADMIN_EMAIL            admin@nyc-taxi.local
-    MB_ADMIN_PASSWORD         local-dev-Taxi2025
-    METABASE_READER_PASSWORD  local-dev-reader
+Settings come from the environment, falling back to the repo's git-ignored .env (create it
+with `make secrets`). There are no default passwords: a missing one stops the script.
+    MB_ADMIN_PASSWORD            required; the admin's password
+    METABASE_READER_PASSWORD     required; must match the Postgres role (same .env)
+    MB_ADMIN_EMAIL               default admin@nyc-taxi.local
+    MB_URL                       default http://localhost:3000
+    MB_ADMIN_PREVIOUS_PASSWORD   one-time rotation: if login with MB_ADMIN_PASSWORD fails,
+                                 log in with this and change the password to MB_ADMIN_PASSWORD
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_env_file(path: Path) -> None:
+    """Add KEY=VALUE lines from .env to os.environ, without overriding what is already set."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        entry = raw_line.strip()
+        if entry and not entry.startswith("#") and "=" in entry:
+            key, value = entry.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+def required(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        sys.exit(f"{name} is not set. Run `make secrets` to create .env, then retry.")
+    return value
+
+
+load_env_file(ROOT / ".env")
 MB_URL = os.environ.get("MB_URL", "http://localhost:3000").rstrip("/")
-ADMIN_EMAIL = os.environ.get("MB_ADMIN_EMAIL", "admin@nyc-taxi.local")
-ADMIN_PASSWORD = os.environ.get("MB_ADMIN_PASSWORD", "local-dev-Taxi2025")
-READER_PASSWORD = os.environ.get("METABASE_READER_PASSWORD", "local-dev-reader")
+ADMIN_EMAIL = os.environ.get("MB_ADMIN_EMAIL") or "admin@nyc-taxi.local"
+ADMIN_PASSWORD = required("MB_ADMIN_PASSWORD")
+READER_PASSWORD = required("METABASE_READER_PASSWORD")
+PREVIOUS_ADMIN_PASSWORD = os.environ.get("MB_ADMIN_PREVIOUS_PASSWORD")
 
 DATABASE_NAME = "NYC Taxi analytics"
 COLLECTION_NAME = "NYC Taxi"
 DASHBOARD_NAME = "NYC Yellow Taxi: demand, revenue and data quality"
-PUBLIC_URL_FILE = Path(__file__).resolve().parents[1] / "data" / "metabase_public_url.txt"
+PUBLIC_URL_FILE = ROOT / "data" / "metabase_public_url.txt"
 
 # Latest successful run per month: reruns append to run_log, dashboards show current state.
 LATEST_RUNS = """latest as (
@@ -207,8 +234,25 @@ class Metabase:
             self.session = self.call("POST", "/setup", body)["id"]
             print(f"completed Metabase setup; admin is {ADMIN_EMAIL}")
         else:
-            body = {"username": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
-            self.session = self.call("POST", "/session", body)["id"]
+            try:
+                self.session = self._session(ADMIN_PASSWORD)
+            except RuntimeError:
+                if not PREVIOUS_ADMIN_PASSWORD:
+                    raise
+                self.rotate_admin_password()
+
+    def _session(self, password: str) -> str:
+        body = {"username": ADMIN_EMAIL, "password": password}
+        return self.call("POST", "/session", body)["id"]
+
+    def rotate_admin_password(self) -> None:
+        """Log in with the previous password and change it to MB_ADMIN_PASSWORD."""
+        self.session = self._session(PREVIOUS_ADMIN_PASSWORD)
+        user_id = self.call("GET", "/user/current")["id"]
+        body = {"password": ADMIN_PASSWORD, "old_password": PREVIOUS_ADMIN_PASSWORD}
+        self.call("PUT", f"/user/{user_id}/password", body)
+        self.session = self._session(ADMIN_PASSWORD)
+        print(f"rotated the Metabase admin password for {ADMIN_EMAIL}")
 
 
 def ensure_database(mb: Metabase) -> int:

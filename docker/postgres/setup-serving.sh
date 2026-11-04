@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Create the BI serving databases and roles. Idempotent, so it runs safely on every
-# `docker compose up`, on a fresh volume or on one Airflow already initialised.
+# `docker compose up`, on a fresh volume or on one Airflow already initialised. Role
+# passwords are (re)set from the environment each run, so rotating one is: edit .env, then
+# `docker compose up`.
 #
 #   analytics        serving copy of the warehouse marts (written by the pipeline)
 #   metabase         Metabase's own application database
@@ -19,6 +21,12 @@ FROM (VALUES ('analytics_writer', :'writer_pw'),
              ('metabase_reader', :'reader_pw'),
              ('metabase_app', :'app_pw')) AS r(name, pw)
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = r.name)
+\gexec
+
+SELECT format('ALTER ROLE %I PASSWORD %L', r.name, r.pw)
+FROM (VALUES ('analytics_writer', :'writer_pw'),
+             ('metabase_reader', :'reader_pw'),
+             ('metabase_app', :'app_pw')) AS r(name, pw)
 \gexec
 
 SELECT 'CREATE DATABASE analytics OWNER analytics_writer'

@@ -6,12 +6,13 @@
 # `make up` starts everything, `make airflow-up` / `make bi-up` start one side.
 # Pipeline outputs land in ./data, shared with the CLI and Docker runs.
 #
-# Passwords below are local-development defaults; override them in .env for anything else.
+# Every password and secret comes from .env, which git ignores and `make secrets` generates
+# with random values. Compose refuses to start if one is missing; none are in this repo.
 
 x-serving-passwords: &serving-passwords
-  ANALYTICS_WRITER_PASSWORD: ${ANALYTICS_WRITER_PASSWORD:-local-dev-writer}
-  METABASE_READER_PASSWORD: ${METABASE_READER_PASSWORD:-local-dev-reader}
-  METABASE_APP_DB_PASSWORD: ${METABASE_APP_DB_PASSWORD:-local-dev-metabase}
+  ANALYTICS_WRITER_PASSWORD: ${ANALYTICS_WRITER_PASSWORD:?set ANALYTICS_WRITER_PASSWORD in .env - run make secrets}
+  METABASE_READER_PASSWORD: ${METABASE_READER_PASSWORD:?set METABASE_READER_PASSWORD in .env - run make secrets}
+  METABASE_APP_DB_PASSWORD: ${METABASE_APP_DB_PASSWORD:?set METABASE_APP_DB_PASSWORD in .env - run make secrets}
 
 x-airflow-common: &airflow-common
   build:
@@ -21,20 +22,20 @@ x-airflow-common: &airflow-common
   user: "${AIRFLOW_UID:-50000}:0"
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - run make secrets}@postgres/airflow
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     # New DAGs start paused, so `up` never starts a backfill (and its downloads) by surprise.
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     # Local development only: every UI user is an admin and no login is needed.
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
-    # Signs task tokens; all Airflow services must share it. Override outside local use.
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-dev-only-not-a-secret}
+    # Signs task tokens; all Airflow services must share it.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env - run make secrets}
     PIPELINE_START_MONTH: ${PIPELINE_START_MONTH:-2025-01}
     PIPELINE_END_MONTH: ${PIPELINE_END_MONTH:-}
     PIPELINE_SOURCE_DIR: ${PIPELINE_SOURCE_DIR:-}
     # The DAG's publish_marts task copies the marts here for Metabase.
-    PIPELINE_SERVING_URL: postgresql://analytics_writer:${ANALYTICS_WRITER_PASSWORD:-local-dev-writer}@postgres:5432/analytics
+    PIPELINE_SERVING_URL: postgresql://analytics_writer:${ANALYTICS_WRITER_PASSWORD:?set ANALYTICS_WRITER_PASSWORD in .env - run make secrets}@postgres:5432/analytics
   volumes:
     - ./data:/opt/airflow/data
     - ./airflow/dags:/opt/airflow/dags  # live-edit DAGs without rebuilding the image
@@ -49,7 +50,8 @@ services:
     image: postgres:17
     environment:
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      # Superuser of the metadata DB; also used by postgres-setup.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - run make secrets}
       POSTGRES_DB: airflow
     volumes:
       - airflow-db:/var/lib/postgresql/data
@@ -67,7 +69,7 @@ services:
       <<: *serving-passwords
       PGHOST: postgres
       PGUSER: airflow
-      PGPASSWORD: airflow
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - run make secrets}
     volumes:
       - ./docker/postgres/setup-serving.sh:/setup-serving.sh:ro
     depends_on:
@@ -83,7 +85,7 @@ services:
       MB_DB_PORT: 5432
       MB_DB_DBNAME: metabase
       MB_DB_USER: metabase_app
-      MB_DB_PASS: ${METABASE_APP_DB_PASSWORD:-local-dev-metabase}
+      MB_DB_PASS: ${METABASE_APP_DB_PASSWORD:?set METABASE_APP_DB_PASSWORD in .env - run make secrets}
       MB_ANON_TRACKING_ENABLED: "false"
       MB_CHECK_FOR_UPDATES: "false"
       JAVA_OPTS: -Xmx1g
